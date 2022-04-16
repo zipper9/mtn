@@ -11,7 +11,7 @@ PREFIX = /usr/local
 
 KERNELNAME=$(shell uname -s)
 OSNAME=$(shell uname -o)
-CFLAGS=-W -Wall -O3 $(USER_CFLAGS)
+CFLAGS=-W -Wall -O3 $(USER_CFLAGS) -Werror=discarded-qualifiers -Werror=implicit-function-declaration
 OUT=../bin
 LIBSDIR=../lib
 
@@ -24,12 +24,6 @@ ifeq ($(KERNELNAME),Linux)
 INCPATH=-I/usr/include/ffmpeg
 endif
 
-ifeq ($(OSNAME),Msys)
-LIBS=-L/mingw64/lib
-INCPATH=-I/mingw64/include
-CFLAGS=-W
-endif
-
 LIBS+=-lavcodec -lavformat -lavcodec -lswscale -lavutil -lgd -lm
 S_INCPATH=-I$(LIBSDIR)/FFmpeg -I$(LIBSDIR)/libgd/src
 S_LIBS= -static-libgcc -static \
@@ -38,19 +32,21 @@ S_LIBS= -static-libgcc -static \
 	$(LIBSDIR)/FFmpeg/libswscale/libswscale.a \
 	$(LIBSDIR)/FFmpeg/libavutil/libavutil.a \
 	$(LIBSDIR)/libgd/Bin/libgd.a \
-	-lpthread -lbz2 -lfreetype -ljpeg -lpng16 -lz -lm
+	-lfreetype -ljpeg -lpng16 -lz -lm
 
-mtn: mtn.c outdir
-	$(CC) -o $(OUT)/mtn mtn.c $(INCPATH) $(CFLAGS) $(LIBS)
+OBJ = mtn.c file_utils.c measure_time.c scan_dir_posix.c
+
+mtn: $(OBJ) outdir
+	$(CC) -o $(OUT)/mtn $(OBJ) $(INCPATH) $(CFLAGS) $(LIBS)
 
 outdir:
 	mkdir -p $(OUT)
 
-static: mtn.c outdir
-	$(CC) -o $(OUT)/mtn mtn.c $(S_INCPATH) $(CFLAGS) $(S_LIBS) -DMTN_STATIC
+static: $(OBJ) outdir
+	$(CC) -o $(OUT)/mtn $(OBJ) $(S_INCPATH) $(CFLAGS) $(S_LIBS) -DMTN_STATIC
 
-debug: mtn.c outdir
-	$(CC) -o $(OUT)/mtn mtn.c $(INCPATH) $(CFLAGS) -W -Wall -g -DDEBUG $(LIBS)
+debug: $(OBJ) outdir
+	$(CC) -o $(OUT)/mtn $(OBJ) $(INCPATH) $(CFLAGS) -W -Wall -g -DDEBUG $(LIBS)
 
 clean:
 	rm -f $(OUT)/mtn

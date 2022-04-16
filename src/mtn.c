@@ -31,15 +31,8 @@
     Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
-// enable unicode functions in mingw
-#ifdef WIN32
-    #define UNICODE
-    #define _UNICODE
-#endif
-
 #include <assert.h>
 #include <ctype.h>
-#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <locale.h>
@@ -48,19 +41,20 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/time.h>
 #include <time.h>
-#include <unistd.h>
 #include <getopt.h>
+#include <gd.h>
 
-#include "libavutil/imgutils.h"
-#include "libavutil/avutil.h"
-#include "libavutil/display.h"
-#include "libavcodec/avcodec.h"
-#include "libavformat/avformat.h"
-#include "libswscale/swscale.h"
+#include "file_utils.h"
+#include "measure_time.h"
+#include "scan_dir.h"
 
-#include "gd.h"
+#include <libavutil/imgutils.h>
+#include <libavutil/avutil.h>
+#include <libavutil/display.h>
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+#include <libswscale/swscale.h>
 
 #define UTF8_FILENAME_SIZE (FILENAME_MAX*4)
 #define LINESIZE_ALIGN 1
@@ -70,25 +64,6 @@
 #define EXIT_WARNING 1
 #define EXIT_ERROR   2
 
-
-#ifdef WIN32
-    unsigned int _CRT_fmode = _O_BINARY;  // default binary file including stdin, stdout, stderr
-    #include <tchar.h>
-    #include <windows.h>
-    #ifdef _UNICODE
-        #define UTF8_2_WC(wdst, src, size) MultiByteToWideChar(CP_UTF8, 0, (src), -1, (wdst), (size))
-        #define WC_2_UTF8(dst, wsrc, size) WideCharToMultiByte(CP_UTF8, 0, (wsrc), -1, (dst), (size), NULL, NULL)
-    #else
-        #define UTF8_2_WC(dst, src, size) ((dst) = (src)) // cant be used to check required size
-        #define WC_2_UTF8(dst, src, size) ((dst) = (src))
-    #endif
-#else
-    #include "fake_tchar.h"
-    #define UTF8_2_WC(dst, src, size) ((dst) = (src)) // cant be used to check required size
-    #define WC_2_UTF8(dst, src, size) ((dst) = (src))
-#endif
-
-
 #ifndef MIN
 #define MIN(a,b) ((a)<(b)?(a):(b))
 #endif
@@ -96,11 +71,10 @@
 #define MAX(a,b) ((a)<(b)?(b):(a))
 #endif
 
-// newline character for info file
-#ifdef WIN32
-    #define NEWLINE "\r\n"
+#ifdef _WIN32
+    #define TEXT_WRITE_MODE _T("wt")
 #else
-    #define NEWLINE "\n"
+    #define TEXT_WRITE_MODE "w"
 #endif
 
 #define EDGE_PARTS 6 // # of parts used in edge detection
@@ -114,16 +88,15 @@ typedef struct rgb_color
     int g;
     int b;
 } rgb_color;
-typedef char color_str[7]; // "RRGGBB" (in hex)
 
-#define COLOR_BLACK (rgb_color){0, 0, 0}
-#define COLOR_GREY (rgb_color){128, 128, 128}
-#define COLOR_WHITE (rgb_color){255, 255, 255}
-#define COLOR_INFO (rgb_color){85, 85, 85}
+#define COLOR_BLACK {0, 0, 0}
+#define COLOR_GREY {128, 128, 128}
+#define COLOR_WHITE {255, 255, 255}
+#define COLOR_INFO {85, 85, 85}
 #define IMAGE_EXTENSION_JPG ".jpg"
 #define IMAGE_EXTENSION_PNG ".png"
 #define LIBGD_FONT_HEIGHT_CORRECTION 1
-#ifdef WIN32
+#ifdef _WIN32
  #define FOLDER_SEPARATOR "\\"
 #else
  #define FOLDER_SEPARATOR "/"
@@ -182,13 +155,12 @@ typedef struct KEYCOUNTER
 
 
 /* command line options & default values */
-#define GB_A_RATIO (AVRational){0, 1}
-AVRational gb_a_ratio = GB_A_RATIO;
+AVRational gb_a_ratio = { 0, 1 };
 #define GB_B_BLANK 0.8
 double gb_b_blank = GB_B_BLANK;
 #define GB_B_BEGIN 0.0
 double gb_B_begin = GB_B_BEGIN; // skip this seconds from the beginning
-#define GB_C_COLUMN 3
+#define GB_C_COLUMN 4
 int gb_c_column = GB_C_COLUMN;
 #define GB_C_CUT -1
 double gb_C_cut = GB_C_CUT; // cut movie; <=0 off
@@ -204,7 +176,7 @@ double gb_E_end = GB_E_END; // skip this seconds at the end
 #ifdef __APPLE__
 #	define GB_F_FONTNAME "Tahoma Bold.ttf"
 #else
-#ifdef WIN32
+#ifdef _WIN32
 #	define GB_F_FONTNAME "tahomabd.ttf"
 #else
 #	define GB_F_FONTNAME "DejaVuSans.ttf"
@@ -245,21 +217,16 @@ int gb_n_normal = GB_N_NORMAL; // normal priority; 1 normal; 0 lower
 char *gb_N_suffix = GB_N_SUFFIX; // info text file suffix
 #define GB_X_FILENAME_USE_FULL 0
 int gb_X_filename_use_full = GB_X_FILENAME_USE_FULL; // use full input filename (include extension)
-#define GB_O_SUFFIX "_s.jpg"
+#define GB_O_SUFFIX ".jpg"
 char *gb_o_suffix = GB_O_SUFFIX;
-#define GB_O_OUTDIR NULL
-char *gb_O_outdir = GB_O_OUTDIR;
-#ifdef WIN32
-    #define GB_P_PAUSE 1
-#else
-    #define GB_P_PAUSE 0
-#endif
+char *gb_O_outdir = NULL;
+#define GB_P_PAUSE 0
 int gb_p_pause = GB_P_PAUSE; // pause before exiting; 1 pause; 0 dont pause
 #define GB_P_DONTPAUSE 0
 int gb_P_dontpause = GB_P_DONTPAUSE; // dont pause; overide gb_p_pause
 #define GB_Q_QUIET 0
 int gb_q_quiet = GB_Q_QUIET; // 1 on; 0 off
-#define GB_R_ROW 0
+#define GB_R_ROW 4
 int gb_r_row = GB_R_ROW; // 0 = as many rows as needed
 #define GB_S_STEP 120
 int gb_s_step = GB_S_STEP; // less than 0 = every frame; 0 = step evenly to get column x row
@@ -292,11 +259,33 @@ AVDictionary *gb__options = NULL;
 
 
 /* more global variables */
-char *gb_argv0 = NULL;
-char *gb_version = "3.4.2";
-time_t gb_st_start = 0; // start time of program
+const char *gb_argv0 = NULL;
+const char *gb_version = "3.4.2";
+filetime_t gb_st_start = 0; // start time of program
 
 /* misc functions */
+
+#ifdef _WIN32
+static inline ascii_lower(char c)
+{
+    if (c >= 'A' && c <= 'Z') return c - 'A' + 'a';
+    return c;
+}
+
+#undef strcasecmp
+int strcasecmp(const char *s1, const char *s2)
+{
+    while (1)
+    {
+        int c1 = ascii_lower(*s1++);
+        int c2 = ascii_lower(*s2++);
+        int diff = c1 - c2;
+        if (diff) return diff > 0 ? 1 : -1;
+        if (!c1) break;
+    }
+    return 0;
+}
+#endif
 
 KeyCounter* kc_new()
 {
@@ -352,12 +341,6 @@ void kc_destroy(KeyCounter **kc)
         free(*kc);
         *kc=NULL;
     }
-}
-
-void dealloc(void *ptr)
-{
-    if(ptr)
-        free(ptr);
 }
 
 int vsprintf_realloc(char **s, int buffsize, const char *format, va_list args)
@@ -447,7 +430,7 @@ void format_time(double duration, TIME_STR str, char sep)
         sprintf(str, "N/A");
     } else {
         int hours, mins, secs;
-        secs = duration;
+        secs = (int) duration;
         mins = secs / 60;
         secs %= 60;
         hours = mins / 60;
@@ -464,8 +447,8 @@ void format_pts(int64_t pts, double time_base, TIME_STR str)
     } else {
         int hours, mins, secs, msec;
         double time_stamp = pts * time_base;
-        secs = time_stamp;
-        msec = (time_stamp - secs) * 1000;
+        secs = (int) time_stamp;
+        msec = (int) ((time_stamp - secs) * 1000);
         mins = secs / 60;
         secs %= 60;
         hours = mins / 60;
@@ -525,13 +508,13 @@ char *format_size_f(int64_t size)
 return only the file name of the full path
 FIXME: wont work in unix if filename has '\\', e.g. path = "hello \\ world";
 */
-char *path_2_file(char *path)
+const char *path_2_file(const char *path)
 {
     int len = strlen(path);
-    char *slash = strrchr(path, '/');
-    char *backslash = strrchr(path, '\\');
+    const char *slash = strrchr(path, '/');
+    const char *backslash = strrchr(path, '\\');
     if (NULL != slash || NULL != backslash) {
-        char *last = (slash > backslash) ? slash : backslash;
+        const char *last = (slash > backslash) ? slash : backslash;
         if (last - path + 1 < len) { // make sure last char is not '/' or '\\'
             return last + 1;
         }
@@ -560,72 +543,9 @@ char *strcpy_va(char *dst, int n, ...)
     return dst;
 }
 
-/* 
-return 1 if file is a regular file
-return 0 if fail or is not 
-*/
-int is_reg(char *file)
-{
-#if defined(WIN32) && defined(_UNICODE)
-    wchar_t file_w[FILENAME_MAX];
-    UTF8_2_WC(file_w, file, FILENAME_MAX);
-#else
-    char *file_w = file;
-#endif
-
-    struct _stat buf;
-    if (0 != _tstat(file_w, &buf)) {
-        return 0;
-    }
-    return S_ISREG(buf.st_mode);
-}
-
-/* 
-return 1 if file is a regular file and modified time >= st_time
-return 0 if fail or is not 
-*/
-int is_reg_newer(char *file, time_t st_time)
-{
-#if defined(WIN32) && defined(_UNICODE)
-    wchar_t file_w[FILENAME_MAX];
-    UTF8_2_WC(file_w, file, FILENAME_MAX);
-#else
-    char *file_w = file;
-#endif
-
-    struct _stat buf;
-    if (0 != _tstat(file_w, &buf)) {
-        return 0;
-    }
-    return S_ISREG(buf.st_mode) && (difftime(buf.st_mtime, st_time) >= 0);
-}
-
-/* 
-return 1 if file is a directory
-return 0 if fail or is not a directory
-FIXME: /c under msys is not a directory. why?
-*/
-int is_dir(char *file)
-{
-#if defined(WIN32) && defined(_UNICODE)
-    wchar_t file_w[FILENAME_MAX];
-    UTF8_2_WC(file_w, file, FILENAME_MAX);
-#else
-    char *file_w = file;
-#endif
-
-    struct _stat buf;
-    if (0 != _tstat(file_w, &buf)) {
-        return 0;
-    }
-    return S_ISDIR(buf.st_mode);
-}
-
-/*
-*/
 char *rem_trailing_slash(char *str)
 {
-#ifdef WIN32
+#ifdef _WIN32
     // mingw doesn't seem to be happy about trailing '/' or '\\'
     // strip trailing '/' or '\\' that might get added by shell filename completion for directories
     int last_index = strlen(str) - 1;
@@ -780,7 +700,7 @@ char *image_string(gdImagePtr ip, char *font, rgb_color color, double size, int 
  */
 int image_string_padding(char *font, double size)
 {
-    int padding = image_string_height("SAMPLE", font, size) * 0.3 + 0.5;
+    int padding = (int) (image_string_height("SAMPLE", font, size) * 0.3 + 0.5);
 
     if(padding > 1)
         return padding;
@@ -791,34 +711,31 @@ int image_string_padding(char *font, double size)
 /*
 return 0 if image is saved
 */
-int save_image(gdImagePtr ip, char *outname)
+int save_image(gdImagePtr ip, const char *outname)
 {
-#if defined(WIN32) && defined(_UNICODE)
-    wchar_t outname_w[FILENAME_MAX];
-    UTF8_2_WC(outname_w, outname, FILENAME_MAX);
-#else
-    char *outname_w = outname;
-#endif
-
-    FILE *fp = _tfopen(outname_w, _TEXT("wb"));
-    if (fp != NULL) {
-
-        char* image_extension = strrchr(outname, '.');
-        if(image_extension && strcmp(image_extension, ".png") == 0 )
-            gdImagePngEx(ip, fp, 9);  // 9-best png compression
+    int result = -1;
+    const tchar_t *tname = utf8_to_tchar(outname);
+    FILE *fp = _tfopen(tname, _TEXT("wb"));
+    if (fp)
+    {
+        const char *image_extension = strrchr(outname, '.');
+        if (image_extension && strcasecmp(image_extension, ".png") == 0)
+            gdImagePngEx(ip, fp, 9); // 9-best png compression
         else
-            gdImageJpeg (ip, fp, gb_j_quality);
+            gdImageJpeg(ip, fp, gb_j_quality);
 
-        if(fclose(fp) == 0)
-            return 0;
+        if (!fclose(fp))
+            result = 0;
         else
             av_log(NULL, AV_LOG_ERROR, "\n%s: closing output image '%s' failed: %s\n", gb_argv0, outname, strerror(errno));
     }
     else
         av_log(NULL, AV_LOG_ERROR, "\n%s: creating output image '%s' failed: %s\n", gb_argv0, outname, strerror(errno));
 
-    return -1;
+    free_conv_result(tname);
+    return result;
 }
+
 /*
 pFrame must be a AV_PIX_FMT_RGB24 frame
 */
@@ -826,12 +743,12 @@ void FrameRGB_2_gdImage(AVFrame *pFrame, gdImagePtr ip, int width, int height)
 {
     uint8_t *src = pFrame->data[0];
     int x, y;
-    for (y = 0; y < height; y++) {
-        for (x = 0; x < width * 3; x += 3) {
-            gdImageSetPixel(ip, x / 3, y, gdImageColorResolve(ip, src[x], src[x + 1], src[x + 2]));
+    for (y = 0; y < height; y++)
+        for (x = 0; x < width; x++)
+        {
+            gdImageSetPixel(ip, x, y, gdImageColorResolve(ip, src[0], src[1], src[2]));
+            src += 3;
         }
-        src += width * 3;
-    }
 }
 
 /* initialize 
@@ -870,8 +787,9 @@ pSprite sprite_create(int max_size, int shot_width, int shot_height, thumbnail t
     s->columns  = (int)(max_size/s->w);
     s->rows     = (int)(max_size/s->h);
     s->vtt_content = NULL;
+    s->curr_filename = NULL;
 
-    char *fname = path_2_file(s->tn.filenamebase);
+    const char *fname = path_2_file(s->tn.filenamebase);
     s->filenamebase = (char*)malloc(sizeof(char) * (strlen(fname) + 1));
     strcpy(s->filenamebase, fname);
 
@@ -922,7 +840,7 @@ void sprite_flush(pSprite s)
         gdImageDestroy(s->ip);
         s->ip = gdImageCreateTrueColor(s->columns*s->w, s->rows*s->h);
 
-        dealloc(s->curr_filename);
+        free(s->curr_filename);
         s->curr_filename = NULL;
         s->nr_of_shots=0;
         s->curr_file_idx++;
@@ -976,44 +894,37 @@ void sprite_add_shot(pSprite s, gdImagePtr ip, int64_t pts)
 
 int sprite_export_vtt(pSprite s)
 {
-    if(s == NULL)
+    if (s == NULL)
         return 0;
 
     char outname[FILENAME_MAX];
     sprintf(outname, "%s.vtt", s->tn.filenamebase);
 
-#if defined(WIN32) && defined(_UNICODE)
-    wchar_t outname_w[FILENAME_MAX];
-    UTF8_2_WC(outname_w, outname, FILENAME_MAX);
-#else
-    char *outname_w = outname;
-#endif
-
-    FILE *fp = _tfopen(outname_w, _TEXT("wb"));
-    if (fp != NULL) {
-
-        if(fwrite(s->vtt_content, sizeof(char), strlen(s->vtt_content), fp) <= 0)
-            av_log(NULL, AV_LOG_ERROR, "\n%s: error writting to file '%s': %s\n", gb_argv0, outname_w, strerror(errno));
-
-        if(fclose(fp) == 0)
-            return 0;
+    int result = -1;
+    tchar_t *toutname = utf8_to_tchar(outname);
+    FILE *fp = _tfopen(toutname, TEXT_WRITE_MODE);
+    if (fp)
+    {
+        if (fwrite(s->vtt_content, sizeof(char), strlen(s->vtt_content), fp) <= 0)
+            av_log(NULL, AV_LOG_ERROR, "\n%s: error writting to file '%s': %s\n", gb_argv0, outname, strerror(errno));
+        if (!fclose(fp))
+            result = 0;
         else
-            av_log(NULL, AV_LOG_ERROR, "\n%s: closing output file '%s' failed: %s\n", gb_argv0, outname_w, strerror(errno));
-
-        return 0;
+            av_log(NULL, AV_LOG_ERROR, "\n%s: closing output file '%s' failed: %s\n", gb_argv0, outname, strerror(errno));
     }
     else
-        av_log(NULL, AV_LOG_ERROR, "\n%s: creating output file '%s' failed: %s\n", gb_argv0, outname_w, strerror(errno));
+        av_log(NULL, AV_LOG_ERROR, "\n%s: creating output file '%s' failed: %s\n", gb_argv0, outname, strerror(errno));
 
-    return -1;
+    free_conv_result(toutname);
+    return result;
 }
 
 void sprite_destroy(pSprite s)
 {
-    if(s)
+    if (s)
     {
-        dealloc(s->vtt_content);
-        dealloc(s->filenamebase);
+        free(s->vtt_content);
+        free(s->filenamebase);
         gdImageDestroy(s->ip);
         free(s);
         s = NULL;
@@ -1037,8 +948,8 @@ int thumb_alloc_dynamic(thumbnail *ptn)
 
 void thumb_cleanup_dynamic(thumbnail *ptn)
 {
-    dealloc(ptn->ppts);
-    dealloc(ptn->filenamebase);
+    free(ptn->ppts);
+    free(ptn->filenamebase);
     ptn->ppts = NULL;
     ptn->filenamebase = NULL;
 }
@@ -1071,26 +982,26 @@ gdImagePtr create_shadow_image(int background, int *INOUTradius, int width, int 
 				if(blurredShadow != NULL)
 				{
 					gdImageDestroy(shadow);
-					av_log(NULL, AV_LOG_INFO, "  thumbnail shadow radius: %dpx %s", radius, NEWLINE);
+					av_log(NULL, AV_LOG_INFO, "  thumbnail shadow radius: %dpx\n", radius);
 					if(gb_g_gap < shadowOffset)
-						av_log(NULL, AV_LOG_INFO, "  thumbnail shadow might be invisible. Consider increase gap between individual shots (-g %d).%s", shadowOffset, NEWLINE);
+						av_log(NULL, AV_LOG_INFO, "  thumbnail shadow might be invisible. Consider increase gap between individual shots (-g %d).\n", shadowOffset);
 					return blurredShadow;
 				}
 				else
-					av_log(NULL, AV_LOG_ERROR, "Can't blur Shadow Image!%s", NEWLINE);
+					av_log(NULL, AV_LOG_ERROR, "Can't blur Shadow Image!\n");
 			}
 			#else
 			{
-				av_log(NULL, AV_LOG_INFO, "Can't blur Shadow Image. Libgd does not support blurring. Use version libgd-2.1.1 or newer.%s", NEWLINE);
+				av_log(NULL, AV_LOG_INFO, "Can't blur Shadow Image. Libgd does not support blurring. Use version libgd-2.1.1 or newer.\n");
 				return shadow;
 			}
             #endif
 		}
 		else
-			av_log(NULL, AV_LOG_ERROR, "Couldn't create Image in Size %dx%d!%s", shW, shH, NEWLINE);
+			av_log(NULL, AV_LOG_ERROR, "Couldn't create Image in Size %dx%d!\n", shW, shH);
 	}
 	else
-		av_log(NULL, AV_LOG_ERROR, "Shadow can't have negative value! (see option --shadow) %s", NEWLINE);
+		av_log(NULL, AV_LOG_ERROR, "Shadow can't have negative value! (see option --shadow)\n");
 
     return NULL;
 }
@@ -1236,7 +1147,7 @@ gdImagePtr detect_edge(AVFrame *pFrame, const thumbnail* const tn, float *edge, 
 
     gdImagePtr ip = gdImageCreateTrueColor(width, height);
     if (NULL == ip) {
-        av_log(NULL, AV_LOG_ERROR, "  gdImageCreateTrueColor failed%s", NEWLINE);
+        av_log(NULL, AV_LOG_ERROR, "  gdImageCreateTrueColor failed\n");
         return NULL;
     }
     if (gb_v_verbose > 0) {
@@ -1297,7 +1208,7 @@ save_AVFrame(
 
     pFrameRGB = av_frame_alloc();
     if (pFrameRGB == NULL) {
-        av_log(NULL, AV_LOG_ERROR, "  couldn't allocate a video frame %s", NEWLINE);
+        av_log(NULL, AV_LOG_ERROR, "  couldn't allocate a video frame\n");
         goto cleanup;
     }
     int rgb_bufsize = av_image_get_buffer_size(rgb_pix_fmt, dst_width, dst_height, LINESIZE_ALIGN);
@@ -1357,12 +1268,12 @@ void dump_packet(AVPacket *p, AVStream * ps)
     pkt->pts can be AV_NOPTS_VALUE if the video format has B frames, so it is 
     better to rely on pkt->dts if you do not decompress the payload.
     */
-    av_log(NULL, AV_LOG_VERBOSE, "***dump_packet: pos:%"PRId64"%s", p->pos, NEWLINE);
-    av_log(NULL, AV_LOG_VERBOSE, "pts tb: %"PRId64", dts tb: %"PRId64", duration tb: %"PRId64"%s",
-        p->pts, p->dts, p->duration, NEWLINE);
-    av_log(NULL, AV_LOG_VERBOSE, "pts s: %.2f, dts s: %.2f, duration s: %.2f%s",
+    av_log(NULL, AV_LOG_VERBOSE, "***dump_packet: pos:%"PRId64"\n", p->pos);
+    av_log(NULL, AV_LOG_VERBOSE, "pts tb: %"PRId64", dts tb: %"PRId64", duration tb: %"PRId64"\n",
+        p->pts, p->dts, p->duration);
+    av_log(NULL, AV_LOG_VERBOSE, "pts s: %.2f, dts s: %.2f, duration s: %.2f\n",
         p->pts * av_q2d(ps->time_base), p->dts * av_q2d(ps->time_base), 
-        p->duration * av_q2d(ps->time_base), NEWLINE); // pts can be AV_NOPTS_VALUE
+        p->duration * av_q2d(ps->time_base)); // pts can be AV_NOPTS_VALUE
 }
 
 void dump_codec_context(AVCodecContext * p)
@@ -1400,26 +1311,19 @@ void dump_index_entries(AVStream * p)
 */
 
 //based on dump.c: static void dump_sidedata(void *ctx, AVStream *st, const char *indent)
-double get_stream_rotation(AVStream *st)
+double get_stream_rotation(const AVStream *st)
 {
-    double rotation = 0.0;
-
     if (st->nb_side_data)
     {
-
         int i;
-        for(i=0; i < st->nb_side_data; i++ )
+        for (i=0; i < st->nb_side_data; i++)
         {
-            AVPacketSideData sd = st->side_data[i];
-
-            if(sd.type == AV_PKT_DATA_DISPLAYMATRIX) {
-                rotation = av_display_rotation_get((int32_t *)sd.data);
-                break;
-            }
+            const AVPacketSideData *sd = st->side_data + i;
+            if (sd->type == AV_PKT_DATA_DISPLAYMATRIX)
+                return av_display_rotation_get((const int32_t *) sd->data);
         }
     }
-
-    return rotation;
+    return 0;
 }
 
 void dump_stream(AVStream * p)
@@ -1447,7 +1351,7 @@ void calc_scale_src(int width, int height, AVRational ratio, int *scaled_w, int 
     *scaled_h = height;
     if (0 != ratio.num) { // ratio is defined
         assert(ratio.den != 0);
-        *scaled_w = av_q2d(ratio) * width + 0.5; // round nearest
+        *scaled_w = (int) (av_q2d(ratio) * width + 0.5); // round nearest
     }
 }
 
@@ -1485,7 +1389,7 @@ AVCodecContext* get_codecContext_from_codecParams(AVCodecParameters* pCodecPar)
     pCodecContext = avcodec_alloc_context3(NULL);
     if(!pCodecContext)
     {
-        av_log(NULL, AV_LOG_ERROR, "Couldn't alocate codec context %s", NEWLINE);
+        av_log(NULL, AV_LOG_ERROR, "Couldn't alocate codec context\n");
         return NULL;
     }
 
@@ -1539,7 +1443,7 @@ void get_stream_info_type(AVFormatContext *ic, enum AVMediaType type, char *buf,
             continue;
         }
 
-        strcat(buf, NEWLINE);
+        strcat(buf, "\n");
 
         if (gb_v_verbose > 0) {
             sprintf(buf + strlen(buf), "Stream %d", i);
@@ -1636,12 +1540,12 @@ void get_stream_info_type(AVFormatContext *ic, enum AVMediaType type, char *buf,
 /*
 modified from libavformat's dump_format
 */
-char *get_stream_info(AVFormatContext *ic, char *url, int strip_path, AVRational __attribute__((unused)) sample_aspect_ratio)
+char *get_stream_info(AVFormatContext *ic, const char *url, int strip_path, AVRational sample_aspect_ratio)
 {
     static char buf[4096]; // FIXME: this is also used for all text at the top
     int duration = -1;
 
-    char *file_name = url;
+    const char *file_name = url;
     if (1 == strip_path) {
         file_name = path_2_file(url);
     }
@@ -1654,10 +1558,10 @@ char *get_stream_info(AVFormatContext *ic, char *url, int strip_path, AVRational
 
     if(gb_H_human_filesize)
         /* File size only in MiB, GiB, ... */
-        sprintf(buf + strlen(buf), "%sSize: %s", NEWLINE, format_size(file_size));
+        sprintf(buf + strlen(buf), "\nSize: %s", format_size(file_size));
     else
         /* File size i bytes and MiB */
-        sprintf(buf + strlen(buf), "%sSize: %"PRId64" bytes (%s)", NEWLINE, file_size, format_size(file_size));
+        sprintf(buf + strlen(buf), "\nSize: %"PRId64" bytes (%s)", file_size, format_size(file_size));
 
 
     if (ic->duration != AV_NOPTS_VALUE) {
@@ -1701,15 +1605,16 @@ char *get_stream_info(AVFormatContext *ic, char *url, int strip_path, AVRational
     return buf;
 }
 
-void dump_format_context(AVFormatContext *p, int __attribute__((unused)) index, char *url, int __attribute__((unused)) is_output)
+void dump_format_context(AVFormatContext *p, int index, const char *url, int is_output)
 {
+    AVRational GB_A_RATIO = {0, 1};
     //av_log(NULL, AV_LOG_ERROR, "\n");
     av_log(NULL, AV_LOG_VERBOSE, "***dump_format_context, name: %s, long_name: %s\n", 
         p->iformat->name, p->iformat->long_name);
     //dump_format(p, index, url, is_output);
 
     // dont show scaling info at this time because we dont have the proper sample_aspect_ratio
-    av_log(NULL, AV_LOG_INFO, "%s%s", get_stream_info(p, url, 0, GB_A_RATIO), NEWLINE);
+    av_log(NULL, AV_LOG_INFO, "%s\n", get_stream_info(p, url, 0, GB_A_RATIO));
 
     av_log(NULL, AV_LOG_VERBOSE, "start_time av: %"PRId64", duration av: %"PRId64"\n",
         p->start_time, p->duration);
@@ -1879,7 +1784,7 @@ video_decode_next_frame(AVFormatContext *pFormatCtx,
     pkt = av_packet_alloc();
     if (!pkt)
     {
-        av_log(NULL, AV_LOG_ERROR ,"Could not allocate packet\n");
+        av_log(NULL, AV_LOG_ERROR, "Could not allocate packet\n");
         return -1;
     }
 
@@ -1979,8 +1884,7 @@ double calc_time(int64_t timestamp, AVRational time_base, double start_time)
 return the duration. guess when unknown.
 must be called after codec has been opened
 */
-double guess_duration(AVFormatContext *pFormatCtx, int index, 
-    AVCodecContext *pCodecCtx, AVFrame __attribute__((unused)) *pFrame)
+double guess_duration(AVFormatContext *pFormatCtx, int index, AVCodecContext *pCodecCtx, AVFrame *pFrame)
 {
     double duration = (double) pFormatCtx->duration / AV_TIME_BASE; // can be incorrect for .vob files
     if (duration > 0) {
@@ -2091,7 +1995,7 @@ int really_seek(AVFormatContext *pFormatCtx, int index, int64_t timestamp, int f
         return -1;
     }
     if (duration > 0) {
-        int64_t duration_tb = duration / av_q2d(pStream->time_base); // in time_base unit
+        int64_t duration_tb = (int64_t) (duration / av_q2d(pStream->time_base)); // in time_base unit
         int64_t byte_pos = av_rescale(timestamp, file_size, duration_tb);
         av_log(NULL, AV_LOG_INFO, "AVSEEK_FLAG_BYTE: byte_pos: %"PRId64", timestamp: %"PRId64", file_size: %"PRId64", duration_tb: %"PRId64"\n", byte_pos, timestamp, file_size, duration_tb);
         return av_seek_frame(pFormatCtx, index, byte_pos, AVSEEK_FLAG_BYTE);
@@ -2155,10 +2059,10 @@ find_default_videostream_index(AVFormatContext *s, int user_selected_video_strea
                 if (++n_video_stream == user_selected_video_stream)
                 {
                     default_stream_idx = i;
-                    av_log(NULL, AV_LOG_INFO, "Selecting video stream (-S): %d%s", user_selected_video_stream, NEWLINE);
+                    av_log(NULL, AV_LOG_INFO, "Selecting video stream (-S): %d\n", user_selected_video_stream);
 
                     if(cover_image)
-                        av_log(NULL, AV_LOG_INFO, "  Warning: Selected video stream is \"cover art\"%s", NEWLINE);
+                        av_log(NULL, AV_LOG_INFO, "  Warning: Selected video stream is \"cover art\"\n");
                     break;
                 }
             }
@@ -2253,7 +2157,7 @@ save_cover_image(AVFormatContext *s, const char* cover_filename)
 
         if(pkt.data && pkt.size > 0)
         {
-            av_log(NULL, AV_LOG_VERBOSE, "Found cover art in stream index %d.%s", cover_stream_idx, NEWLINE);
+            av_log(NULL, AV_LOG_VERBOSE, "Found cover art in stream index %d.\n", cover_stream_idx);
 
             FILE* image_file = fopen(cover_filename, "wb");
             if(image_file)
@@ -2262,11 +2166,11 @@ save_cover_image(AVFormatContext *s, const char* cover_filename)
                 fclose(image_file);
             }
             else
-                av_log(NULL, AV_LOG_ERROR, "Error opening file \"%s\" for writting!%s", cover_filename, NEWLINE);
+                av_log(NULL, AV_LOG_ERROR, "Error opening file \"%s\" for writting!\n", cover_filename);
         }
     }
     else
-        av_log(NULL, AV_LOG_VERBOSE, "No cover art found.%s", NEWLINE);
+        av_log(NULL, AV_LOG_VERBOSE, "No cover art found.\n");
 }
 
 void
@@ -2284,23 +2188,23 @@ calculate_thumbnail(
     tn->column = req_cols;
 
     if (req_step > 0)
-        tn->step_t = req_step / tn->time_base;
+        tn->step_t = (int64_t) (req_step / tn->time_base);
     else
-        tn->step_t = duration / tn->time_base / (tn->column * req_rows + 1);
+        tn->step_t = (int64_t) (duration / tn->time_base / (tn->column * req_rows + 1));
 
     if (req_rows > 0) {
         tn->row = req_rows;
         // if # of columns is reduced, we should increase # of rows so # of tiles would be almost the same
         // could some users not want this?
     } else { // as many rows as needed
-        tn->row = floor(duration / tn->column / (tn->step_t * tn->time_base) + 0.5); // round nearest
+        tn->row = (int) (floor(duration / tn->column / (tn->step_t * tn->time_base) + 0.5)); // round nearest
     }
     if (tn->row < 1) {
         tn->row = 1;
     }
 
     // make sure last row is full
-    tn->step_t = duration / tn->time_base / (tn->column * tn->row + 1);
+    tn->step_t = (int64_t) (duration / tn->time_base / (tn->column * tn->row + 1));
 
     int full_width = tn->column * (src_width + gb_g_gap) + gb_g_gap;
     if (gb_w_width > 0 && gb_w_width < full_width) {
@@ -2312,7 +2216,7 @@ calculate_thumbnail(
     tn->shot_width_out -= tn->shot_width_out%2; // floor to even number
     tn->shot_height_out = floor((double) src_height / src_width * tn->shot_width_out + 0.5); // round nearest
     tn->shot_height_out -= tn->shot_height_out%2; // floor to even number
-    tn->center_gap = (tn->img_width - gb_g_gap*(tn->column+1) - tn->shot_width_out * tn->column) / 2.0;
+    tn->center_gap = (tn->img_width - gb_g_gap*(tn->column+1) - tn->shot_width_out * tn->column) / 2;
 }
 
 void
@@ -2360,7 +2264,7 @@ reduce_shots_to_fit_in(
         if(reduced_rows == 0)
             reduced_rows = 1;
 
-        av_log(NULL, AV_LOG_INFO, "  movie is too short, reducing number of rows to %d%s", reduced_rows, NEWLINE);
+        av_log(NULL, AV_LOG_INFO, "  movie is too short, reducing number of rows to %d\n", reduced_rows);
 
         calculate_thumbnail(
             req_step,
@@ -2380,7 +2284,7 @@ reduce_shots_to_fit_in(
  *          1 some images are missing
  */
 int
-make_thumbnail(char *file)
+make_thumbnail(const char *file)
 {
     int return_code = -1;
     av_log(NULL, AV_LOG_VERBOSE, "make_thumbnail: %s\n", file);
@@ -2389,8 +2293,7 @@ make_thumbnail(char *file)
     int idx = 0;
     int thumb_nb = 0;
 
-    struct timeval tstart;
-    gettimeofday(&tstart, NULL);
+    int64_t tstart = get_current_time();
 
     thumbnail tn; // thumbnail data & info
     thumb_new(&tn);
@@ -2412,6 +2315,8 @@ make_thumbnail(char *file)
     //FILE *out_fp = NULL;
     FILE *info_fp = NULL;
     gdImagePtr ip = NULL;
+    tchar_t *out_filename = NULL;
+    tchar_t *info_filename = NULL;
 
     int t_timestamp = gb_t_timestamp; // local timestamp; can be turned off; 0 = off
     int ret;
@@ -2419,8 +2324,7 @@ make_thumbnail(char *file)
     av_log(NULL, AV_LOG_INFO, "\n");
 
     {
-        char *extpos;
-        char *filenamepos = NULL;
+        const char *filenamepos = NULL;
         char filenamebase[UTF8_FILENAME_SIZE] = {'\0',};
 
         if (gb_O_outdir != NULL && strlen(gb_O_outdir) > 0) {
@@ -2430,12 +2334,13 @@ make_thumbnail(char *file)
         }
 
         filenamepos=path_2_file(filenamebase);
-        extpos = strrchr(filenamepos, '.');
 
-        if (gb_X_filename_use_full != 1 && extpos != NULL)
+        if (!gb_X_filename_use_full)
         {
+            char *extpos = strrchr(filenamepos, '.');
             // remove movie extenxtion (e.g. .avi)
-            *extpos = '\0';
+            if (extpos)
+                *extpos = '\0';
         }
 
         tn.filenamebase = (char*)malloc((strlen(filenamebase)+1) * sizeof(char));
@@ -2457,58 +2362,57 @@ make_thumbnail(char *file)
         }
     }
 
-    char *suffix;
-
     // idenfity thumbnail image extension
-    char image_extension[5];
-    suffix = strrchr(tn.out_filename, '.');
-    if(suffix && strcasecmp(suffix, ".png")==0 )
-        strcpy(image_extension, IMAGE_EXTENSION_PNG);
+    const char *image_extension;
+    const char *suffix = strrchr(tn.out_filename, '.');
+    if (suffix && strcasecmp(suffix, ".png") == 0)
+        image_extension = IMAGE_EXTENSION_PNG;
     else
-        strcpy(image_extension, IMAGE_EXTENSION_JPG);
+        image_extension = IMAGE_EXTENSION_JPG;
 
-
+    out_filename = utf8_to_tchar(tn.out_filename);
+    info_filename = utf8_to_tchar(tn.info_filename);
+    
+#if 0
     // if output files exist and modified time >= program start time,
     // we'll not overwrite and use a new name
     int unum = 0;
-    if (is_reg_newer(tn.out_filename, gb_st_start)) {
+    if (is_reg_newer(out_filename, gb_st_start))
+    {
         unum = make_unique_name(tn.out_filename, gb_o_suffix, unum);
         av_log(NULL, AV_LOG_INFO, "%s: output file already exists. using: %s\n", gb_argv0, tn.out_filename);
+        free_conv_result(out_filename);
+        out_filename = utf8_to_tchar(tn.out_filename);
     }
-    if (NULL != gb_N_suffix && is_reg_newer(tn.info_filename, gb_st_start)) {
+    if (gb_N_suffix && is_reg_newer(info_filename, gb_st_start))
+    {
         unum = make_unique_name(tn.info_filename, gb_N_suffix, unum);
         av_log(NULL, AV_LOG_INFO, "%s: info file already exists. using: %s\n", gb_argv0, tn.info_filename);
+        free_conv_result(info_filename);
+        info_filename = utf8_to_tchar(tn.info_filename);
     }
-    if (0 == gb_W_overwrite) { // dont overwrite mode
-        if (is_reg(tn.out_filename)) {
+#endif
+    if (!gb_W_overwrite) // don't overwrite mode
+    {
+        if (is_reg(out_filename))
+        {
             av_log(NULL, AV_LOG_INFO, "%s: output file %s already exists. omitted.\n", gb_argv0, tn.out_filename);
             return_code = 0;
             goto cleanup;
         }
-        if (NULL != gb_N_suffix && is_reg(tn.info_filename)) {
+        if (gb_N_suffix && is_reg(info_filename))
+        {
             av_log(NULL, AV_LOG_INFO, "%s: info file %s already exists. omitted.\n", gb_argv0, tn.info_filename);
             return_code = 0;
             goto cleanup;
         }
     }
-#if defined(WIN32) && defined(_UNICODE)
-//    wchar_t out_filename_w[FILENAME_MAX];
-//    UTF8_2_WC(out_filename_w, tn.out_filename, FILENAME_MAX);
-    wchar_t info_filename_w[FILENAME_MAX];
-    UTF8_2_WC(info_filename_w, tn.info_filename, FILENAME_MAX);
-#else
-//    char *out_filename_w = tn.out_filename;
-    char *info_filename_w = tn.info_filename;
-#endif
-//    out_fp = _tfopen(out_filename_w, _TEXT("wb"));
-//    if (NULL == out_fp) {
-//        av_log(NULL, AV_LOG_ERROR, "\n%s: creating output image '%s' failed: %s\n", gb_argv0, tn.out_filename, strerror(errno));
-//        goto cleanup;
-//    }
-    if (NULL != gb_N_suffix) {
+    if (gb_N_suffix)
+    {
         av_log(NULL, AV_LOG_INFO, "\nCreating info file %s\n", tn.info_filename);
-        info_fp = _tfopen(info_filename_w, _TEXT("wb"));
-        if (NULL == info_fp) {
+        info_fp = _tfopen(info_filename, TEXT_WRITE_MODE);
+        if (!info_fp)
+        {
             av_log(NULL, AV_LOG_ERROR, "\n%s: creating info file '%s' failed: %s\n", gb_argv0, tn.info_filename, strerror(errno));
             goto cleanup;
         }
@@ -2549,11 +2453,11 @@ make_thumbnail(char *file)
     pCodecCtx = get_codecContext_from_codecParams(pStream->codecpar);
     tn.time_base = av_q2d(pStream->time_base);
 
-    if(!pCodecCtx)
+    if (!pCodecCtx)
         goto cleanup;
 
-    if((tn.rotation = get_stream_rotation(pStream)) != 0)
-        av_log(NULL, AV_LOG_INFO,  "  Rotation: %d degrees%s", tn.rotation, NEWLINE);
+    if ((tn.rotation = get_stream_rotation(pStream)) != 0)
+        av_log(NULL, AV_LOG_INFO,  "  Rotation: %d degrees\n", tn.rotation);
     
     dump_stream(pStream);
     //dump_index_entries(pStream);
@@ -2706,7 +2610,7 @@ make_thumbnail(char *file)
         gb_c_column,
         scaled_src_width_out,
         scaled_src_height_out,
-        net_duration,
+        (int) net_duration,
         &tn
     );
 
@@ -2715,12 +2619,12 @@ make_thumbnail(char *file)
         int suggested_width, suggested_height;
         // guess new width and height to create thumbnails
         suggested_width = ceil(gb_h_height * scaled_src_width_out/scaled_src_height_out + 2*(double)gb_g_gap);
-        suggested_width+= suggested_width%2;
-        suggested_height = floor((gb_w_width - 2*gb_g_gap) * scaled_src_height_out/scaled_src_width_out);
-        suggested_height-= suggested_height%2;
+        suggested_width += suggested_width % 2;
+        suggested_height = (int) floor((gb_w_width - 2*gb_g_gap) * scaled_src_height_out/scaled_src_width_out);
+        suggested_height -= suggested_height % 2;
 
-        av_log(NULL, AV_LOG_ERROR, "  thumbnail to small; increase image width to %d (-w) or decrease min. image height to %d (-h)%s" ,
-               suggested_width, suggested_height, NEWLINE);
+        av_log(NULL, AV_LOG_ERROR, "  thumbnail to small; increase image width to %d (-w) or decrease min. image height to %d (-h)\n" ,
+               suggested_width, suggested_height);
         goto cleanup;
     }
 
@@ -2745,15 +2649,15 @@ make_thumbnail(char *file)
     }
     char *all_text = get_stream_info(pFormatCtx, file, 1, sample_aspect_ratio); // FIXME: using function's static buffer
     if (NULL != info_fp) {
-        fprintf(info_fp, "%s%s", all_text, NEWLINE);
+        fprintf(info_fp, "%s\n", all_text);
     }
     if (0 == gb_i_info) { // off
         *all_text = '\0';
     }
     if (NULL != gb_T_text) {
-        sprintf(all_text+strlen(all_text), "%s%s", NEWLINE, gb_T_text);
+        sprintf(all_text+strlen(all_text), "\n%s", gb_T_text);
         if (NULL != info_fp) {
-            fprintf(info_fp, "%s%s", gb_T_text, NEWLINE);
+            fprintf(info_fp, "%s\n", gb_T_text);
         }
     }
 
@@ -2835,9 +2739,10 @@ make_thumbnail(char *file)
 
     /* add info & text */ // do this early so when font is not found we'll quit early
     if (NULL != all_text && strlen(all_text) > 0) {
+        rgb_color color = COLOR_WHITE;
         char *str_ret = image_string(tn.out_ip, 
             gb_f_fontname, gb_F_info_color, gb_F_info_font_size, 
-            gb_L_info_location, gb_g_gap, all_text, 0, COLOR_WHITE, info_text_padding);
+            gb_L_info_location, gb_g_gap, all_text, 0, color, info_text_padding);
         if (NULL != str_ret) {
             av_log(NULL, AV_LOG_ERROR, "  %s; font problem? see -f option\n", str_ret);
             goto cleanup;
@@ -2876,7 +2781,7 @@ make_thumbnail(char *file)
     int evade_try = 0; // blank screen evasion index
     double avg_evade_try = 0; // average
     int direction = 0; // seek direction (seek flags)
-    seek_target = tn.step_t + (start_time + gb_B_begin) / tn.time_base;
+    seek_target = tn.step_t + (int64_t) ((start_time + gb_B_begin) / tn.time_base);
     idx = 0; // idx = thumb_idx
     thumb_nb = tn.row * tn.column; // thumb_nb = # of shots we need
     int64_t prevshot_pts = -1; // pts of previous good shot
@@ -3092,9 +2997,11 @@ make_thumbnail(char *file)
             /* stamp idx & blank & edge for debugging */
             if (gb_v_verbose > 0) {
                 char idx_str[1000]; // FIXME
+                rgb_color white = COLOR_WHITE;
+                rgb_color black = COLOR_BLACK;
                 sprintf(idx_str, "idx: %d, blank: %.2f\n%.6f  %.6f\n%.6f  %.6f\n%.6f  %.6f", 
                     idx, blank, edge[0], edge[1], edge[2], edge[3], edge[4], edge[5]);
-                image_string(ip, gb_f_fontname, COLOR_WHITE, gb_F_ts_font_size, 2, 0, idx_str, 1, COLOR_BLACK, 0);
+                image_string(ip, gb_f_fontname, white, gb_F_ts_font_size, 2, 0, idx_str, 1, black, 0);
             }
         }
 
@@ -3166,7 +3073,7 @@ make_thumbnail(char *file)
   eof: ;
     /* crop if we dont get enough shots */
     int cropp_needed = 0;
-    const int created_rows = ceil((double)idx / tn.column);
+    const int created_rows = (int) ceil((double)idx / tn.column);
     int skipped_rows = tn.row - created_rows;
     if (skipped_rows == tn.row) {
         av_log(NULL, AV_LOG_ERROR, "  all rows're skipped?\n");
@@ -3212,9 +3119,8 @@ make_thumbnail(char *file)
     else
         goto cleanup;
 
-    struct timeval tfinish;
-    gettimeofday(&tfinish, NULL); // calendar time; effected by load & io & etc.
-    double diff_time = (tfinish.tv_sec + tfinish.tv_usec/1000000.0) - (tstart.tv_sec + tstart.tv_usec/1000000.0);
+    int64_t tfinish = get_current_time();
+    double diff_time = diff_time_sec(tstart, tfinish);
     // previous version reported # of decoded shots/s; now we report the # of final shots/s
     //av_log(NULL, AV_LOG_INFO, "  avg. %.2f shots/s; output file: %s\n", nb_shots / diff_time, tn.out_filename);
     av_log(NULL, AV_LOG_INFO, "  %.2f s, %.2f shots/s; output: %s\n",
@@ -3226,42 +3132,45 @@ make_thumbnail(char *file)
         return_code = 1;        // warning - some images are missing
 
   cleanup:
-    if (NULL != ip)
+    if (ip)
         gdImageDestroy(ip);
-    if (NULL != thumbShadowIm)
+    if (thumbShadowIm)
         gdImageDestroy(thumbShadowIm);
-    if (NULL != tn.out_ip)
+    if (tn.out_ip)
         gdImageDestroy(tn.out_ip);
 
-    if (NULL != info_fp) {
+    if (info_fp)
+    {
         fclose(info_fp);
-        if (gb_I_individual_ignore_grid == 0 && 1 != tn.out_saved) {
-            _tunlink(info_filename_w);
-        }
+        if (!gb_I_individual_ignore_grid && !tn.out_saved)
+            delete_file(info_filename);
     }
 
-    if (NULL != pSwsCtx)
+    if (pSwsCtx)
         sws_freeContext(pSwsCtx); // do we need to do this?
 
     // Free the video frame
-    if (NULL != rgb_buffer)
+    if (rgb_buffer)
         av_free(rgb_buffer);
-    if (NULL != pFrameRGB)
+    if (pFrameRGB)
         av_free(pFrameRGB);
-    if (NULL != pFrame)
+    if (pFrame)
         av_free(pFrame);
 
     // Close the codec
-    if (NULL != pCodecCtx) {
+    if (pCodecCtx)
+    {
         avcodec_close(pCodecCtx);
         avcodec_free_context(&pCodecCtx);
     }    
 
     // Close the video file
-    if (NULL != pFormatCtx)
+    if (pFormatCtx)
         avformat_close_input(&pFormatCtx);
 
     thumb_cleanup_dynamic(&tn);
+    free_conv_result(out_filename);
+    free_conv_result(info_filename);
     
     av_log(NULL, AV_LOG_VERBOSE, "make_thumbnail: done\n");
     return return_code;
@@ -3284,230 +3193,122 @@ int myalphacasesort(const void *a, const void *b)
 /*
 return 1 if filename has one of the predefined extensions
 */
-int check_extension(char *filename)
+int check_extension(const char *filename)
 {
-    static char *movie_ext[] = {
-        "3gp", "3g2", "asf", "avi", "avs", "dat", "divx", "dsm", "evo", "flv", 
-        "m1v", "m2ts", "m2v", "m4a", "mj2", "mjpg", "mjpeg", "mkv", "mov", 
-        "moov", "mp4", "mpg", "mpeg", "mpv", "nut", "ogg", "ogm", "qt", "rm", 
+    static const char *movie_ext[] =
+    {
+        "3g2", "3gp", "asf", "avi", "avs", "dat", "divx", "dsm", "evo", "flv", 
+        "m1v", "m2ts", "m2v", "m4a", "mj2", "mjpeg", "mjpg", "mkv", "moov",
+        "mov", "mp4", "mpeg", "mpg", "mpv", "nut", "ogg", "ogm", "qt", "rm", 
         "rmvb", "swf", "ts", "vob", "webm", "wmv", "xvid"
-    }; // FIXME: static
-    static int sorted = 0; // 1 = sorted
+    };
 
     static const int nb_ext = sizeof(movie_ext) / sizeof(*movie_ext);
-    if (0 == sorted) {
-        qsort(movie_ext, nb_ext, sizeof(*movie_ext), myalphacasesort);
-        sorted = 1;
-    }
+#if defined(_DEBUG) && !defined(NDEBUG)
+    int i;
+    for (i = 0; i < nb_ext-1; i++)
+        assert(strcasecmp(movie_ext[i], movie_ext[i+1]) < 0);
+#endif
 
-    char *ext = strrchr(filename, '.');
-    if (NULL == ext) {
+    if (strstr(filename, "uTorrentPartFile"))
         return 0;
-    }
-    ext += 1;
-    if (NULL == bsearch(&ext, movie_ext, nb_ext, sizeof(*movie_ext), myalphacasesort)) {
+    const char *ext = strrchr(filename, '.');
+    if (!ext)
         return 0;
-    }
-    if (NULL != strstr(filename, "uTorrentPartFile")) {
-        return 0;
-    }
-    return 1;
+    ext++;
+    return bsearch(&ext, movie_ext, nb_ext, sizeof(*movie_ext), myalphacasesort) != NULL;
 }
 
-int process_loop(int n, char **files, int current_depth);
-
-/**
- * @brief modified from glibc's scandir -- mingw doesn't have scandir
- * @return 0- success, otherwise - failed
- */
-int process_dir(char *dir, int current_depth)
+struct process_dir_context
 {
-    int return_code = -1;
+    int processed;
+    int errors;
+};
 
-    if(gb_d_depth >= 0 && current_depth>gb_d_depth)
-        return 0;
-
-    current_depth++;
-
-#if defined(WIN32) && defined(_UNICODE)
-    wchar_t dir_w[FILENAME_MAX];
-    UTF8_2_WC(dir_w, dir, FILENAME_MAX);
-#else
-    char *dir_w = dir;
-#endif
-
-    _TDIR *dp = _topendir(dir_w);
-    if (NULL == dp) {
-        av_log(NULL, AV_LOG_ERROR, "\n%s: opendir failed: %s\n", dir, strerror(errno));
-        return -1;
+static void process_dir_func(void *context, const tchar_t *path)
+{
+    struct process_dir_context *ctx = (struct process_dir_context *) context;
+    const char *converted_path = tchar_to_utf8(path);
+    if (check_extension(converted_path))
+    {
+        if (make_thumbnail(converted_path))
+            ctx->errors++;
+        ctx->processed++;
     }
-
-    /* read directory & sort */
-    struct _tdirent *d;
-    char **v = NULL;
-    size_t cnt = 0, vsize = 0;
-    while (1) {
-        errno = 0;
-        d = _treaddir(dp);
-        if (NULL == d) {
-            if (0 != errno) { // is this check good?
-                av_log(NULL, AV_LOG_ERROR, "\n%s: readdir failed: %s\n", dir, strerror(errno));
-                goto cleanup;
-            }
-            break;
-        }
-
-        if (_tcscmp(d->d_name, _TEXT(".")) == 0 || _tcscmp(d->d_name, _TEXT("..")) == 0) {
-            continue;
-        }
-
-#if defined(WIN32) && defined(_UNICODE)
-        char d_name_utf8[UTF8_FILENAME_SIZE];
-        WC_2_UTF8(d_name_utf8, d->d_name, UTF8_FILENAME_SIZE);
-#else
-        char *d_name_utf8 = d->d_name;
-#endif
-
-        char child_utf8[UTF8_FILENAME_SIZE];
-        strcpy_va(child_utf8, 3, dir, FOLDER_SEPARATOR, d_name_utf8);
-
-        if (1 != is_dir(child_utf8) && 1 != check_extension(child_utf8)) {
-            continue;
-        }
-
-        if (cnt == vsize) {
-            char **new;
-            if (vsize == 0)
-                vsize = 50;
-            else
-                vsize *= 2;
-            new = realloc(v, vsize * sizeof(*v));
-            if (new == NULL) {
-                // mingw doesn't seem to set errno for memory functions
-                av_log(NULL, AV_LOG_ERROR, "\n%s: realloc failed: %s\n", dir, strerror(errno));
-                goto cleanup;
-            }
-            v = new;
-        }
-
-        char *vnew = malloc(strlen(child_utf8) + 1); // for '\0'
-        if (vnew == NULL) {
-            av_log(NULL, AV_LOG_ERROR, "\n%s: malloc failed: %s\n", dir, strerror(errno));
-            goto cleanup;
-        }
-        strcpy(vnew, child_utf8);
-        v[cnt++] = vnew;
-        //av_log(NULL, AV_LOG_INFO, "process_dir added: %s\n", v[cnt-1]); // DEBUG
-    }
-    qsort(v, cnt, sizeof(*v), myalphasort);
-
-    /* process dirs & files */
-    return_code = process_loop(cnt, v, current_depth);
-
-  cleanup:
-    while (cnt > 0)
-        free(v[--cnt]);
-    free(v);
-    _tclosedir(dp);
-
-    return return_code;
+    free_conv_result(converted_path);
 }
 
-/**
- * @return
- *  0- success
- *  1- uncomplete image(s)
- *  2- error
- */
-int process_loop(int n, char **files, int current_depth)
+void process_dir(const tchar_t *path)
+{
+    struct process_dir_context ctx;
+    ctx.processed = ctx.errors = 0;
+    scan_dir(path, process_dir_func, &ctx, gb_d_depth);
+}
+
+#ifdef _WIN32
+void process_pattern(const tchar_t *path, const tchar_t *pattern)
+{
+    struct process_dir_context ctx;
+    ctx.processed = ctx.errors = 0;
+    scan_dir_pattern(path, pattern, process_dir_func, &ctx, 0);
+}
+#endif
+
+void process_files(char *paths[], int count)
 {
     int i;
-    int files_done=0;
-    int files_uncomplete=0;
-
-    for (i = 0; i < n; i++) {
-        av_log(NULL, AV_LOG_VERBOSE, "process_loop: %s\n", files[i]);
-        rem_trailing_slash(files[i]); //
-
-        if (is_dir(files[i])) { // directory
-            //av_log(NULL, AV_LOG_INFO, "process_loop: %s is a DIR\n", files[i]); // DEBUG
-            if(process_dir(files[i], current_depth) == 0)
-                files_done++;
-        } else { // not a directory
-
-            switch (make_thumbnail(files[i])) {
-            case 0:
-                files_done++;
-                break;
-            case 1:
-                files_done++;
-                files_uncomplete++;
-                break;
-            default:
-                break;
+    for (i = 0; i < count; i++)
+    {
+        rem_trailing_slash(paths[i]);
+        tchar_t *path = utf8_to_tchar(paths[i]);
+        if (is_dir(path))
+            process_dir(path);
+        else
+        {
+#ifdef _WIN32
+            tchar_t *file = (tchar_t *) tbasename(path);
+            if (_tcschr(file, _T('*')) || _tcschr(file, _T('?')))
+            {
+                const tchar_t *dir = path;
+                if (file == path)
+                    dir = _T(".");
+                else
+                    file[-1] = 0;
+                process_pattern(dir, file);
             }
+            else
+#endif
+                make_thumbnail(paths[i]);
         }
+        free_conv_result(path);
     }
-
-    if(files_done == n && files_uncomplete > 0)
-        return EXIT_WARNING;
-
-    if(files_done == n)
-        return EXIT_SUCCESS;
-
-    return EXIT_ERROR;
 }
 
-// copied & modified from mingw-runtime-3.13's init.c
-typedef struct STARTUPINFO{
-  int newmode;
-} _startupinfo;
-extern void __wgetmainargs (int *, wchar_t ***, wchar_t ***, int, _startupinfo *);
-
-char *gb_argv[10240]; // FIXME: global & hopefully noone will use more than this
 /*
 get command line arguments and expand wildcards in utf-8 in windows
 caller needs to free argv[i]
 return 0 if ok
 */
-int get_windows_argv(int __attribute__((unused)) *pargc, char __attribute__((unused)) ***pargv)
+#if defined(_WIN32) && defined(_UNICODE)
+int get_windows_argv(int *pargc, char ***pargv)
 {
-#if defined(WIN32) && defined(_UNICODE)
-    // copied & modified from mingw-runtime-3.13's init.c
-    int _argc = 0;
-    wchar_t **_argv = 0;
-    wchar_t **dummy_environ = 0;
-    _startupinfo start_info;
-    start_info.newmode = 0;
-    __wgetmainargs(&_argc, &_argv, &dummy_environ, -1, &start_info);
-
-    //printf("\nafter __wgetmainargs; _argc: %d\n", _argc); // DEBUG
-    int i;
-    for (i = 0; i < _argc; i++) {
-        //wprintf(L"_argv[%d] wc: %s\n", i, _argv[i]); // DEBUG
-        char utf8_buf[UTF8_FILENAME_SIZE] = "";
-        WC_2_UTF8(utf8_buf, _argv[i], UTF8_FILENAME_SIZE);
-        //printf("_argv[%d] utf8: %s\n", i, utf8_buf); // DEBUG
-
-        char *dup = strdup(utf8_buf);
-        if (NULL == dup) {
-            goto error;
-        }
-        gb_argv[i] = dup;
+    const WCHAR *cmd_line = GetCommandLineW();
+    int i, count;
+    LPWSTR *result = CommandLineToArgvW(cmd_line, &count);
+    if (!result)
+    {
+        *pargc = 0;
+        *pargv = NULL;
+        return -1;
     }
-    *pargc = _argc;
-    *pargv = gb_argv;
-    return 0;
-
-  error:
-    while (--_argc >= 0) {
-        free(gb_argv[_argc]);
-    }
-    return -1;
-#endif
-
+    *pargv = malloc(sizeof(char*) * count);
+    for (i = 0; i < count; i++)
+        (*pargv)[i] = wstr_to_utf8(result[i]);
+    *pargc = count;
+    LocalFree(result);
     return 0;
 }
+#endif
 
 /*
 */
@@ -3554,38 +3355,33 @@ int get_location_opt(char c, char *optarg)
     return ret;
 }
 
-static const int hex2int[] = {0,1,2,3,4,5,6,7,8,9,0,0,0,0,0,0,0,10,11,12,13,14,15};
-#define CHAR2INT(p) (hex2int[(p)-'0']) // A-F must be in uppercase
 /*
-col must be in the correct format RRGGBB (in hex)
-*/
-rgb_color color_str2rgb_color(color_str col)
-{
-    return (rgb_color) {CHAR2INT(col[0])*16 + CHAR2INT(col[1]), 
-        CHAR2INT(col[2])*16 + CHAR2INT(col[3]), 
-        CHAR2INT(col[4])*16 + CHAR2INT(col[5]) };
-}
-
-/*
-check and convert color_str to rgb_color
+check and convert string to rgb_color, must be in the correct format RRGGBB (in hex)
 return -1 if error
 */
-int parse_color(rgb_color *rgb, color_str str)
+int parse_color(rgb_color *rgb, const char *str)
 {
-    if (NULL == str || strlen(str) < 6) {
+    if (!str || strlen(str) < 6)
         return -1;
-    }
-    int i;
-    for (i = 0; i < 6; i++) {
-        char upper = toupper(str[i]);
-        if (upper < '0' || upper > 'F')
+
+    unsigned bytes[3] = { 0, 0, 0 };
+    unsigned i;
+    for (i = 0; i < 6; i++)
+    {
+        unsigned digit;
+        if (str[i] >= '0' && str[i] <= '9')
+            digit = str[i] - '0';
+        else if (str[i] >= 'a' && str[i] <= 'f')
+            digit = str[i] - 'a' + 10;
+        else if (str[i] >= 'A' && str[i] <= 'F')
+            digit = str[i] - 'A' + 10;
+        else
             return -1;
-        if (upper < 'A' && upper > '9')
-            return -1;
-        str[i] = upper;
+        bytes[i/2] = bytes[i/2] << 4 | digit;
     }
-    *rgb = color_str2rgb_color(str);
-    //av_log(NULL, AV_LOG_INFO, "parse_color: %s=>%d,%d,%d\n", str, rgb->r, rgb->g, rgb->b); //DEBUG
+    rgb->r = bytes[0];
+    rgb->g = bytes[1];
+    rgb->b = bytes[2];
     return 0;
 }
 
@@ -3636,7 +3432,7 @@ int get_format_opt(char c, char *optarg)
         gb_F_ts_font_size = gb_F_info_font_size - 1;
         goto cleanup;
     }
-    gb_F_ts_fontname = token;
+    gb_F_ts_fontname = token; // FIXME: bug
     // time stamp font color
     token = strtok (NULL, delim);
     if (NULL == token || -1 == parse_color(&gb_F_ts_color , token)) {
@@ -3792,7 +3588,7 @@ usage()
     av_log(NULL, AV_LOG_INFO, "  -N info_suffix : save info text to a file with suffix\n");
     av_log(NULL, AV_LOG_INFO, "  -o %s : output suffix including image extension (.jpg or .png)\n", GB_O_SUFFIX);
     av_log(NULL, AV_LOG_INFO, "  -O directory : save output files in the specified directory\n");
-    av_log(NULL, AV_LOG_INFO, "  -p : pause before exiting; default on in win32\n");
+    av_log(NULL, AV_LOG_INFO, "  -p : pause before exiting\n");
     av_log(NULL, AV_LOG_INFO, "  -P : don't pause before exiting; override -p\n");
     av_log(NULL, AV_LOG_INFO, "  -q : quiet mode (print only error messages)\n");
     av_log(NULL, AV_LOG_INFO, "  -r %d : # of rows; >0:override -s\n", GB_R_ROW);
@@ -3812,7 +3608,7 @@ usage()
     av_log(NULL, AV_LOG_INFO, "  --vtt[=path in .vtt]\n       export WebVTT file and sprite chunks\n");
     av_log(NULL, AV_LOG_INFO, "  --options=option_entries\n       list of options passed to the FFmpeg library. option_entries contains list of options separated by \"|\". Each option contains name and value separated by \":\".\n");
     av_log(NULL, AV_LOG_INFO, "  file_or_dirX\n       name of the movie file or directory containing movie files\n\n");
-#ifdef WIN32
+#ifdef _WIN32
     av_log(NULL, AV_LOG_INFO, "Examples:\n");
     av_log(NULL, AV_LOG_INFO, "  to save thumbnails to file infile%s with default options:\n    %s infile.avi\n", GB_O_SUFFIX, gb_argv0);
     av_log(NULL, AV_LOG_INFO, "  to change time step to 65 seconds & change total width to 900:\n    %s -s 65 -w 900 infile.avi\n", gb_argv0);
@@ -3857,17 +3653,20 @@ int main(int argc, char *argv[])
     gb_argv0 = path_2_file(argv[0]);
     setvbuf(stderr, NULL, _IONBF, 0); // turn off buffering in mingw
 
-    gb_st_start = time(NULL); // program start time
+    gb_st_start = get_current_filetime(); // program start time
     srand(gb_st_start);
 
+#if defined(_WIN32) && defined(_UNICODE)
     // get utf-8 argv in windows
-    if (0 != get_windows_argv(&argc, &argv)) {
+    if (get_windows_argv(&argc, &argv))
+    {
         av_log(NULL, AV_LOG_ERROR, "%s: cannot get command line arguments\n", gb_argv0);
         return -1;
     }
+#endif
 
     // set locale
-    __attribute__((unused)) char *locale = setlocale(LC_ALL, "");
+    char *locale = setlocale(LC_ALL, "");
     //av_log(NULL, AV_LOG_VERBOSE, "locale: %s\n", locale);
 
     /* get & check options */
@@ -3929,7 +3728,7 @@ int main(int argc, char *argv[])
             break;
         case 'a':
             if (0 == get_double_opt('a', &tmp_a_ratio, optarg, 1)) { // success
-                gb_a_ratio.num = tmp_a_ratio * 10000;
+                gb_a_ratio.num = (int) (tmp_a_ratio * 10000);
                 gb_a_ratio.den = 10000;
             } else {
                 parse_error++;
@@ -4086,6 +3885,7 @@ int main(int argc, char *argv[])
     if (optind == argc) {
         //av_log(NULL, AV_LOG_ERROR, "%s: no input files or directories specified", gb_argv0);
         parse_error += 1;
+        usage();
     }
     
     /* check arguments */
@@ -4106,14 +3906,12 @@ int main(int argc, char *argv[])
         parse_error += 1;
     }
 
-    if (0 != parse_error) {
-        usage();
+    if (parse_error)
         goto exit;
-    }
 
     /* lower priority */
     if (1 != gb_n_normal) { // lower priority
-#ifdef WIN32
+#ifdef _WIN32
         SetPriorityClass(GetCurrentProcess(), IDLE_PRIORITY_CLASS);
 #else
 		errno = 0;
@@ -4125,16 +3923,21 @@ int main(int argc, char *argv[])
     }
 
     /* create output directory */
-    if (NULL != gb_O_outdir && !is_dir(gb_O_outdir)) {
-#ifdef WIN32
-        int ret = mkdir(gb_O_outdir);
+    if (gb_O_outdir)
+    {
+        tchar_t *tmp = utf8_to_tchar(gb_O_outdir);
+        if (!is_dir(tmp) && create_directory(tmp))
+        {
+            free_conv_result(tmp);
+#ifdef _WIN32
+            // FIXME
+            av_log(NULL, AV_LOG_ERROR, "\n%s: creating output directory '%s' failed\n", gb_argv0, gb_O_outdir);
 #else
-        int ret = mkdir(gb_O_outdir, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH);
-#endif
-        if (0 != ret) {
             av_log(NULL, AV_LOG_ERROR, "\n%s: creating output directory '%s' failed: %s\n", gb_argv0, gb_O_outdir, strerror(errno));
+#endif
             goto exit;
         }
+        free_conv_result(tmp);
     }
 
     /* init */
@@ -4157,14 +3960,13 @@ int main(int argc, char *argv[])
     //gdUseFontConfig(1); // set GD to use fontconfig patterns
 
     /* process movie files */
-    return_code = process_loop(argc - optind, argv + optind, 0);
+    process_files(argv + optind, argc - optind);
 
   exit:
     // clean up
-#if defined(WIN32) && defined(_UNICODE)
-    while (--argc >= 0) {
-        free(argv[argc]);
-    }
+
+#if defined(_WIN32) && defined(_UNICODE)
+    while (argc) free(argv[--argc]);
 #endif
 
     if(gb__options)
