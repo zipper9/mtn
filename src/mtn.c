@@ -57,7 +57,6 @@
 #include <libavformat/avformat.h>
 #include <libswscale/swscale.h>
 
-#define UTF8_FILENAME_SIZE (FILENAME_MAX*4)
 #define LINESIZE_ALIGN 1
 #define MAX_PACKETS_WITHOUT_PICTURE 1000
 
@@ -94,13 +93,13 @@ typedef char TIME_STR[20];
  #define FOLDER_SEPARATOR "/"
 #endif
 
-typedef struct thumbnail
+struct thumbnail
 {
     gdImagePtr out_ip;
-    char *filenamebase;
-    char out_filename[UTF8_FILENAME_SIZE];
-    char info_filename[UTF8_FILENAME_SIZE];
-    char cover_filename[UTF8_FILENAME_SIZE];
+    struct string_buffer base_filename;
+    struct string_buffer out_filename;
+    struct string_buffer info_filename;
+    struct string_buffer cover_filename;
     int out_saved;                          // 1 = out file is successfully saved
     int img_width, img_height;
     int txt_height;
@@ -116,13 +115,14 @@ typedef struct thumbnail
 
     // dynamic
     int64_t *ppts; // array of pts value of each shot
-} thumbnail; // thumbnail data & info
+};
 
-typedef struct SPRITE
+struct sprite
 {
     gdImagePtr ip;
-    thumbnail tn;
-    char *vtt_content;
+    const struct thumbnail *parent;
+    struct string_buffer vtt_content;
+    struct string_buffer curr_filename;
     int w;
     int h;
     int columns;
@@ -130,9 +130,7 @@ typedef struct SPRITE
     int nr_of_shots;
     int curr_file_idx;
     int64_t last_shot_pts;
-    char *curr_filename;
-    char *filenamebase;
-} Sprite, *pSprite;
+};
 
 typedef struct KEYS
 {
@@ -149,8 +147,6 @@ typedef struct KEYCOUNTER
 
 /* command line options & default values */
 AVRational gb_a_ratio = { 0, 1 };
-
-AVDictionary *gb__options = NULL;
 
 static int V_DEBUG = 0;
 
@@ -238,61 +234,6 @@ void kc_destroy(KeyCounter **kc)
         *kc=NULL;
     }
 }
-
-int vsprintf_realloc(char **s, int buffsize, const char *format, va_list args)
-{
-    va_list args_copy;
-    va_copy(args_copy, args);
-
-    int rc = vsnprintf(NULL, 0, format, args_copy);
-
-    if(rc >= buffsize)
-    {
-        buffsize = rc + sizeof(char);
-        *s = (char*)realloc(*s, buffsize);
-    }
-    return vsnprintf(*s, buffsize, format, args);
-}
-
-int sprintf_realloc(char **buffer, int b_len, const char *format, ...)
-{
-    va_list args;
-    int ret;
-
-    va_start(args, format);
-    ret = vsprintf_realloc(buffer, b_len, format, args);
-    va_end(args);
-
-    return ret;
-}
-
-char* vstrcat_realloc(char **buffer, char *format,  va_list args)
-{
-    char *newbuff = NULL;
-    vsprintf_realloc(&newbuff, 0, format, args);
-
-    int buflen2 = strlen(newbuff);
-    int buflen1 = 0;
-    if(*buffer)
-        buflen1 = strlen(*buffer);
-
-    *buffer = (char*)realloc(*buffer,(buflen1 + buflen2 + 1) * sizeof(char));
-
-    return strcat(*buffer, newbuff);
-}
-
-char* strcat_realloc(char **buffer, char *format, ...)
-{
-    va_list args;
-    char* ret;
-
-    va_start(args, format);
-    ret = vstrcat_realloc(buffer, format, args);
-    va_end(args);
-
-    return ret;
-}
-
 
 /* strrstr not in mingw
 */
@@ -392,44 +333,6 @@ char *format_size_f(int64_t size)
     } while (needToPrint >= bufflength);
 
     return buf;
-}
-/*
-return only the file name of the full path
-FIXME: wont work in unix if filename has '\\', e.g. path = "hello \\ world";
-*/
-const char *path_2_file(const char *path)
-{
-    int len = strlen(path);
-    const char *slash = strrchr(path, '/');
-    const char *backslash = strrchr(path, '\\');
-    if (NULL != slash || NULL != backslash) {
-        const char *last = (slash > backslash) ? slash : backslash;
-        if (last - path + 1 < len) { // make sure last char is not '/' or '\\'
-            return last + 1;
-        }
-    }
-    return path;
-}
-
-/* 
-copy n strings to dst
-... must be char *
-dst must be large enough
-*/
-char *strcpy_va(char *dst, int n, ...)
-{
-    va_list ap;
-    int pos = 0;
-    dst[pos] = '\0';
-    va_start(ap, n);
-    int i;
-    for (i=0; i < n; i++) {
-        char *s = va_arg(ap, char *);
-        assert(NULL != s);
-        strcat(dst, s);
-    }
-    va_end(ap);
-    return dst;
 }
 
 char *rem_trailing_slash(char *str)
@@ -617,12 +520,9 @@ void FrameRGB_2_gdImage(AVFrame *pFrame, gdImagePtr ip, int width, int height)
 
 /* initialize 
 */
-void thumb_new(thumbnail *ptn)
+void thumb_new(struct thumbnail *ptn)
 {
     ptn->out_ip = NULL;
-    ptn->out_filename[0]   = '\0';
-    ptn->info_filename[0]  = '\0';
-    ptn->cover_filename[0] = '\0';
     ptn->out_saved = 0;
     ptn->img_width = ptn->img_height = 0;
     ptn->txt_height = 0;
@@ -637,34 +537,34 @@ void thumb_new(thumbnail *ptn)
 
     // dynamic
     ptn->ppts = NULL;
+    sb_init(&ptn->base_filename);
+    sb_init(&ptn->out_filename);
+    sb_init(&ptn->info_filename);
+    sb_init(&ptn->cover_filename);
 }
 
-pSprite sprite_create(int max_size, int shot_width, int shot_height, thumbnail tn)
+struct sprite *sprite_create(int max_size, int shot_width, int shot_height, const struct thumbnail *parent)
 {
-    pSprite s = malloc(sizeof(Sprite));
-    s->tn = tn;
+    struct sprite *s = malloc(sizeof(*s));
     s->nr_of_shots   = 0;
     s->curr_file_idx = 0;
     s->last_shot_pts = 0;
     s->w        = shot_width;
     s->h        = shot_height;
-    s->columns  = (int)(max_size/s->w);
-    s->rows     = (int)(max_size/s->h);
-    s->vtt_content = NULL;
-    s->curr_filename = NULL;
+    s->columns  = max_size/s->w;
+    s->rows     = max_size/s->h;
+    s->parent = parent;
+    sb_init(&s->vtt_content);
+    sb_init(&s->curr_filename);
 
-    const char *fname = path_2_file(s->tn.filenamebase);
-    s->filenamebase = (char*)malloc(sizeof(char) * (strlen(fname) + 1));
-    strcpy(s->filenamebase, fname);
-
-    sprintf_realloc(&s->vtt_content, 0, "WEBVTT\n\nNOTE This file has been generated by Movie Thumbnailer\nhttps://gitlab.com/movie_thumbnailer/mtn/-/wikis");
+    sb_add_string(&s->vtt_content, "WEBVTT\n\nNOTE This file has been generated by Movie Thumbnailer\nhttps://gitlab.com/movie_thumbnailer/mtn/-/wikis");
 
     s->ip = gdImageCreateTrueColor(s->columns*shot_width, s->rows*shot_height);
 
     return s;
 }
 
-void sprite_fit(pSprite s)
+void sprite_fit(struct sprite *s)
 {
     if (s->nr_of_shots > 0 && s->nr_of_shots < s->columns*s->rows)
     {
@@ -686,7 +586,7 @@ void sprite_fit(pSprite s)
     }
 }
 
-void sprite_flush(pSprite s, const struct options *o)
+void sprite_flush(struct sprite *s, const struct options *o)
 {
     if (!s)
         return;
@@ -694,24 +594,30 @@ void sprite_flush(pSprite s, const struct options *o)
     if (s->nr_of_shots > 0)
     {
         sprite_fit(s);
-
-        int buflen = snprintf(NULL, 0, "%s_vtt_%d%s", s->tn.filenamebase, s->curr_file_idx, o->o_suffix) + 1;
-        char *outname = (char*)malloc(buflen);
-        snprintf(outname, buflen, "%s_vtt_%d%s", s->tn.filenamebase, s->curr_file_idx, o->o_suffix);
+        char num_buf[64];
+        int num_len = sprintf(num_buf, "_vtt_%d", s->curr_file_idx);
+        int filename_len = s->parent->base_filename.len;
+        int suffix_len = strlen(o->o_suffix);
+        char *outname = (char *) malloc(filename_len + num_len + suffix_len + 1);
+        char *p = outname;
+        memcpy(p, s->parent->base_filename.s, filename_len);
+        p += filename_len;
+        memcpy(p, num_buf, num_len);
+        p += num_len;
+        strcpy(p, o->o_suffix);
         save_image(s->ip, outname, o);
         free(outname);
 
         gdImageDestroy(s->ip);
         s->ip = gdImageCreateTrueColor(s->columns*s->w, s->rows*s->h);
 
-        free(s->curr_filename);
-        s->curr_filename = NULL;
-        s->nr_of_shots=0;
+        sb_clear(&s->curr_filename);
+        s->nr_of_shots = 0;
         s->curr_file_idx++;
     }
 }
 
-void sprite_add_shot(pSprite s, gdImagePtr ip, int64_t pts, const struct options *o)
+void sprite_add_shot(struct sprite *s, gdImagePtr ip, int64_t pts, const struct options *o)
 {
     int very_first_shot = (s->nr_of_shots==0 && s->curr_file_idx==0)? 1 : 0;
 
@@ -723,27 +629,33 @@ void sprite_add_shot(pSprite s, gdImagePtr ip, int64_t pts, const struct options
 
     TIME_STR time_from, time_to;
     int64_t pts_from = s->last_shot_pts;
-    int64_t pts_to =   pts + s->tn.step_t/2.0;
+    int64_t pts_to = pts + s->parent->step_t / 2;
 
-    if (s->curr_filename == NULL)
-        sprintf_realloc(&s->curr_filename, 0, "%s%s_vtt_%d%s", o->webvtt_prefix, s->filenamebase, s->curr_file_idx, o->o_suffix);
+    if (!s->curr_filename.len)
+    {
+        sb_add_string(&s->curr_filename, o->webvtt_prefix);
+        sb_add_buffer(&s->curr_filename, &s->parent->base_filename);
+        char tmp_buf[64];
+        sb_add_string_len(&s->curr_filename, tmp_buf, sprintf(tmp_buf, "_vtt_%d", s->curr_file_idx));
+        sb_add_string(&s->curr_filename, o->o_suffix);
+    }
 
     if (very_first_shot)
-        format_pts(0, s->tn.time_base, time_from);
+        format_pts(0, s->parent->time_base, time_from);
     else
-        format_pts(pts_from, s->tn.time_base, time_from);
+        format_pts(pts_from, s->parent->time_base, time_from);
 
-    format_pts(pts_to, s->tn.time_base, time_to);
+    format_pts(pts_to, s->parent->time_base, time_to);
 
-    strcat_realloc(&s->vtt_content, "\n\n%s --> %s\n%s#xywh=%d,%d,%d,%d",
-        time_from,
-        time_to,
-        s->curr_filename,
-        posX,
-        posY,
-        s->w,
-        s->h
-        );
+    sb_add_string(&s->vtt_content, "\n\n");
+    sb_add_string(&s->vtt_content, time_from);
+    sb_add_string(&s->vtt_content, " --> ");
+    sb_add_string(&s->vtt_content, time_to);
+    sb_add_char(&s->vtt_content, '\n');
+    sb_add_buffer(&s->vtt_content, &s->curr_filename);
+    char tmp_buf[256];
+    sb_add_string_len(&s->vtt_content, tmp_buf,
+        sprintf(tmp_buf, "#xywh=%d,%d,%d,%d", posX, posY, s->w, s->h));
 
     gdImageCopy(s->ip, ip,
         posX, posY,
@@ -756,20 +668,22 @@ void sprite_add_shot(pSprite s, gdImagePtr ip, int64_t pts, const struct options
         sprite_flush(s, o);
 }
 
-int sprite_export_vtt(pSprite s)
+int sprite_export_vtt(struct sprite *s)
 {
     if (s == NULL)
         return 0;
 
-    char outname[FILENAME_MAX];
-    sprintf(outname, "%s.vtt", s->tn.filenamebase);
+    int filename_len = s->parent->base_filename.len;
+    char *outname = (char *) malloc(5 + filename_len);
+    memcpy(outname, s->parent->base_filename.s, filename_len);
+    strcpy(outname + filename_len, ".vtt");
 
     int result = -1;
-    tchar_t *toutname = utf8_to_tchar(outname);
-    FILE *fp = _tfopen(toutname, TEXT_WRITE_MODE);
+    tchar_t *outname_w = utf8_to_tchar(outname);
+    FILE *fp = _tfopen(outname_w, TEXT_WRITE_MODE);
     if (fp)
     {
-        if (fwrite(s->vtt_content, 1, strlen(s->vtt_content), fp) <= 0)
+        if (fwrite(s->vtt_content.s, 1, s->vtt_content.len, fp) <= 0)
             av_log(NULL, AV_LOG_ERROR, "\n%s: error writting to file '%s': %s\n", gb_argv0, outname, strerror(errno));
         if (!fclose(fp))
             result = 0;
@@ -779,43 +693,39 @@ int sprite_export_vtt(pSprite s)
     else
         av_log(NULL, AV_LOG_ERROR, "\n%s: creating output file '%s' failed: %s\n", gb_argv0, outname, strerror(errno));
 
-    free_conv_result(toutname);
+    free_conv_result(outname_w);
+    free(outname);
     return result;
 }
 
-void sprite_destroy(pSprite s)
+void sprite_destroy(struct sprite *s)
 {
-    if (s)
-    {
-        free(s->vtt_content);
-        free(s->filenamebase);
-        gdImageDestroy(s->ip);
-        free(s);
-        s = NULL;
-    }
+    if (!s) return;
+    sb_destroy(&s->vtt_content);
+    sb_destroy(&s->curr_filename);
+    gdImageDestroy(s->ip);
+    free(s);
 }
 
 /* 
 alloc dynamic data; must be called after all required static data is filled in
 return -1 if failed
 */
-int thumb_alloc_dynamic(thumbnail *ptn)
+int thumb_alloc_dynamic(struct thumbnail *ptn)
 {
     ptn->ppts = malloc(ptn->column * ptn->row * sizeof(*(ptn->ppts)));
-    ptn->filenamebase = NULL;
-
-    if (NULL == ptn->ppts) {
-        return -1;
-    }
+    if (!ptn->ppts) return -1;
     return 0;
 }
 
-void thumb_cleanup_dynamic(thumbnail *ptn)
+void thumb_cleanup_dynamic(struct thumbnail *ptn)
 {
     free(ptn->ppts);
-    free(ptn->filenamebase);
     ptn->ppts = NULL;
-    ptn->filenamebase = NULL;
+    sb_destroy(&ptn->base_filename);
+    sb_destroy(&ptn->out_filename);
+    sb_destroy(&ptn->info_filename);
+    sb_destroy(&ptn->cover_filename);
 }
 
 /* returns blured shadow on success, NULL otherwise	*/
@@ -880,7 +790,7 @@ add shot
 because ptn->idx is the last index, this function assumes that shots will be added 
 in increasing order.
 */
-void thumb_add_shot(thumbnail *ptn, gdImagePtr ip, gdImagePtr thumbShadowIm, int shadow_pos, int idx, int64_t pts, const struct options *o)
+void thumb_add_shot(struct thumbnail *ptn, gdImagePtr ip, gdImagePtr thumbShadowIm, int shadow_pos, int idx, int64_t pts, const struct options *o)
 {
     int dstX = idx%ptn->column * (ptn->shot_width_out+o->g_gap) + o->g_gap + ptn->center_gap;
     int dstY = idx/ptn->column * (ptn->shot_height_out+o->g_gap) + o->g_gap
@@ -989,7 +899,7 @@ http://www.pages.drexel.edu/~weg22/edge.html
 http://student.kuleuven.be/~m0216922/CG/filtering.html
 http://cvs.php.net/viewvc.cgi/php-src/ext/gd/libgd/gd.c?revision=1.111&view=markup
 */
-gdImagePtr detect_edge(AVFrame *pFrame, const thumbnail* const tn, float *edge, float edge_found, const struct options *o)
+gdImagePtr detect_edge(AVFrame *pFrame, const struct thumbnail* const tn, float *edge, float edge_found, const struct options *o)
 {
     int width =  tn->shot_width_in;
     int height = tn->shot_height_in;
@@ -1435,7 +1345,7 @@ void get_stream_info(struct string_buffer *sb, const AVFormatContext *ic, const 
 
     const char *file_name = url;
     if (strip_path)
-        file_name = path_2_file(url);
+        file_name = basename(url);
 
     int64_t file_size = avio_size(ic->pb);
 
@@ -1494,13 +1404,12 @@ void get_stream_info(struct string_buffer *sb, const AVFormatContext *ic, const 
     get_stream_info_type(sb, ic, AVMEDIA_TYPE_SUBTITLE, sample_aspect_ratio, o->v_verbose);
 }
 
-void dump_format_context(AVFormatContext *p, int index, const char *url, int is_output,  const struct options *o)
+void dump_format_context(AVFormatContext *p, int index, const char *url, const struct options *o)
 {
     AVRational GB_A_RATIO = {0, 1};
     //av_log(NULL, AV_LOG_ERROR, "\n");
     av_log(NULL, AV_LOG_VERBOSE, "***dump_format_context, name: %s, long_name: %s\n", 
         p->iformat->name, p->iformat->long_name);
-    //dump_format(p, index, url, is_output);
 
     // dont show scaling info at this time because we dont have the proper sample_aspect_ratio
     struct string_buffer sb;
@@ -1893,6 +1802,7 @@ int really_seek(AVFormatContext *pFormatCtx, int index, int64_t timestamp, int f
     return -1;
 }
 
+#if 0
 /* 
 modify name so that it'll (hopefully) be unique
 by inserting a unique string before suffix.
@@ -1919,6 +1829,7 @@ int make_unique_name(char *name, char *suffix, int unum)
     }
     return unum;
 }
+#endif
 
 /*
  * find first usable video stream (not cover art)
@@ -1962,16 +1873,6 @@ find_default_videostream_index(AVFormatContext *s, int user_selected_video_strea
     }
 
     return default_stream_idx;
-}
-
-void rotate_geometry(int *w, int *h, int angle)
-{
-    if(abs(angle) == 90)
-    {
-        int tmp = *w;
-        *w = *h;
-        *h = tmp;
-    }
 }
 
 gdImagePtr rotate_gdImage(gdImagePtr ip, int angle)
@@ -2063,7 +1964,7 @@ calculate_thumbnail(
         int src_width,
         int src_height,
         int duration,
-        thumbnail *tn,
+        struct thumbnail *tn,
         const struct options *o
 )
 {
@@ -2109,7 +2010,7 @@ reduce_shots_to_fit_in(
     int src_width,
     int src_height,
     int duration,
-    thumbnail *tn,
+    struct thumbnail *tn,
     const struct options *o
 )
 {
@@ -2157,13 +2058,16 @@ int make_thumbnail(const char *file, const struct options *o, int nb_file)
 
     int64_t tstart = get_current_time();
 
-    thumbnail tn; // thumbnail data & info
+    struct thumbnail tn; // thumbnail data & info
     thumb_new(&tn);
 
     struct string_buffer info_buf;
+    struct string_buffer individual_filename;
+
     sb_init(&info_buf);
+    sb_init(&individual_filename);
     
-    pSprite sprite = NULL;
+    struct sprite *sprite = NULL;
     
     gdImagePtr thumbShadowIm = NULL;
     int shadow_radius = o->shadow;
@@ -2178,7 +2082,6 @@ int make_thumbnail(const char *file, const struct options *o, int nb_file)
     uint8_t *rgb_buffer = NULL;
     struct SwsContext *pSwsCtx = NULL;
     tn.out_ip = NULL;
-    //FILE *out_fp = NULL;
     FILE *info_fp = NULL;
     gdImagePtr ip = NULL;
     tchar_t *out_filename = NULL;
@@ -2187,57 +2090,53 @@ int make_thumbnail(const char *file, const struct options *o, int nb_file)
     int t_timestamp = o->t_timestamp; // local timestamp; can be turned off; 0 = off
     int ret;
 
-    av_log(NULL, AV_LOG_INFO, "\n");
+    if (nb_file)
+        av_log(NULL, AV_LOG_INFO, "\n");
 
+    if (o->O_outdir && *o->O_outdir)
     {
-        const char *filenamepos = NULL;
-        char filenamebase[UTF8_FILENAME_SIZE] = {'\0',};
+        sb_add_string(&tn.base_filename, o->O_outdir);
+        sb_add_string(&tn.base_filename, FOLDER_SEPARATOR);
+        sb_add_string(&tn.base_filename, basename(file));
+    }
+    else
+        sb_add_string(&tn.base_filename, file);
 
-        if (o->O_outdir && *o->O_outdir)
-            strcpy_va(filenamebase, 3, o->O_outdir, FOLDER_SEPARATOR, path_2_file(file));
-        else
-            strcpy(filenamebase, file);
+    if (!o->X_filename_use_full)
+    {
+        const char *filename = basename(tn.base_filename.s);
+        const char *extpos = strrchr(filename, '.');
+        // remove movie extenxtion (e.g. .avi)
+        if (extpos)
+            sb_shrink(&tn.base_filename, extpos - tn.base_filename.s);
+    }
 
-        filenamepos = path_2_file(filenamebase);
+    sb_add_buffer(&tn.out_filename, &tn.base_filename);
+    sb_add_string(&tn.out_filename, o->o_suffix);
 
-        if (!o->X_filename_use_full)
-        {
-            char *extpos = strrchr(filenamepos, '.');
-            // remove movie extenxtion (e.g. .avi)
-            if (extpos)
-                *extpos = '\0';
-        }
+    if (o->N_suffix && *o->N_suffix)
+    {
+        sb_add_buffer(&tn.info_filename, &tn.base_filename);
+        sb_add_string(&tn.info_filename, o->N_suffix);
+    }
 
-        tn.filenamebase = (char *) malloc(strlen(filenamebase) + 1);
-        strcpy(tn.filenamebase, filenamebase);
-
-        strcpy(tn.out_filename, filenamebase);
-        strcat(tn.out_filename, o->o_suffix);
-
-        if (o->N_suffix && *o->N_suffix)
-        {
-            strcpy(tn.info_filename, filenamebase);
-            strcat(tn.info_filename, o->N_suffix);
-        }
-
-        if (o->cover)
-        {
-            strcpy(tn.cover_filename, filenamebase);
-            strcat(tn.cover_filename, o->cover_suffix);
-        }
+    if (o->cover)
+    {
+        sb_add_buffer(&tn.cover_filename, &tn.base_filename);
+        sb_add_string(&tn.cover_filename, o->cover_suffix);
     }
 
     // idenfity thumbnail image extension
     const char *image_extension;
-    const char *suffix = strrchr(tn.out_filename, '.');
+    const char *suffix = strrchr(tn.out_filename.s, '.');
     if (suffix && strcasecmp(suffix, ".png") == 0)
         image_extension = IMAGE_EXTENSION_PNG;
     else
         image_extension = IMAGE_EXTENSION_JPG;
 
-    out_filename = utf8_to_tchar(tn.out_filename);
-    if (o->N_suffix && *o->N_suffix)
-        info_filename = utf8_to_tchar(tn.info_filename);
+    out_filename = utf8_to_tchar(tn.out_filename.s);
+    if (tn.info_filename.len)
+        info_filename = utf8_to_tchar(tn.info_filename.s);
     
 #if 0
     // if output files exist and modified time >= program start time,
@@ -2262,24 +2161,24 @@ int make_thumbnail(const char *file, const struct options *o, int nb_file)
     {
         if (is_reg(out_filename))
         {
-            av_log(NULL, AV_LOG_INFO, "%s: output file %s already exists. omitted.\n", gb_argv0, tn.out_filename);
+            av_log(NULL, AV_LOG_INFO, "%s: output file %s already exists. omitted.\n", gb_argv0, tn.out_filename.s);
             return_code = 0;
             goto cleanup;
         }
         if (info_filename && is_reg(info_filename))
         {
-            av_log(NULL, AV_LOG_INFO, "%s: info file %s already exists. omitted.\n", gb_argv0, tn.info_filename);
+            av_log(NULL, AV_LOG_INFO, "%s: info file %s already exists. omitted.\n", gb_argv0, tn.info_filename.s);
             return_code = 0;
             goto cleanup;
         }
     }
     if (info_filename)
     {
-        av_log(NULL, AV_LOG_INFO, "\nCreating info file %s\n", tn.info_filename);
+        av_log(NULL, AV_LOG_INFO, "\nCreating info file %s\n", tn.info_filename.s);
         info_fp = _tfopen(info_filename, TEXT_WRITE_MODE);
         if (!info_fp)
         {
-            av_log(NULL, AV_LOG_ERROR, "\n%s: creating info file '%s' failed: %s\n", gb_argv0, tn.info_filename, strerror(errno));
+            av_log(NULL, AV_LOG_ERROR, "\n%s: creating info file '%s' failed: %s\n", gb_argv0, tn.info_filename.s, strerror(errno));
             goto cleanup;
         }
     }
@@ -2309,7 +2208,7 @@ int make_thumbnail(const char *file, const struct options *o, int nb_file)
         av_log(NULL, AV_LOG_ERROR, "\n%s: avformat_find_stream_info %s failed: %d\n", gb_argv0, file, ret);
         goto cleanup;
     }
-    dump_format_context(pFormatCtx, nb_file, file, 0, o);
+    dump_format_context(pFormatCtx, nb_file, file, o);
 
     // Find videostream
     int video_index = find_default_videostream_index(pFormatCtx, o->S_select_video_stream);
@@ -2373,7 +2272,7 @@ int make_thumbnail(const char *file, const struct options *o, int nb_file)
     }
 
     if (o->cover)
-        save_cover_image(pFormatCtx, tn.cover_filename);
+        save_cover_image(pFormatCtx, tn.cover_filename.s);
 
     // keep a copy of sample_aspect_ratio because it might be changed after 
     // decoding a frame, e.g. Dragonball Z 001 (720x480 H264 AAC).mkv
@@ -2488,7 +2387,11 @@ int make_thumbnail(const char *file, const struct options *o, int nb_file)
     int scaled_src_width_out  = scaled_src_width;
     int scaled_src_height_out = scaled_src_height;
 
-    rotate_geometry(&scaled_src_width_out, &scaled_src_height_out, tn.rotation);
+    if (abs(tn.rotation) == 90)
+    {
+        scaled_src_width_out  = scaled_src_height;
+        scaled_src_height_out = scaled_src_width;
+    }
 
     reduce_shots_to_fit_in(
         o->s_step,
@@ -2616,7 +2519,7 @@ int make_thumbnail(const char *file, const struct options *o, int nb_file)
     }
 
     if (o->webvtt)
-        sprite = sprite_create(o->w_width, tn.shot_width_in, tn.shot_height_out, tn);
+        sprite = sprite_create(o->w_width, tn.shot_width_in, tn.shot_height_out, &tn);
     
     /* setting alpha blending is not needed, using default mode:
      * https://libgd.github.io/manuals/2.2.5/files/gd-h.html#Effects
@@ -2923,27 +2826,30 @@ int make_thumbnail(const char *file, const struct options *o, int nb_file)
             TIME_STR time_str;
             format_time(calc_time(found_pts, pStream->time_base, start_time), time_str, '_');
 
-            char individual_filename[UTF8_FILENAME_SIZE]; // FIXME
-            strcpy(individual_filename, tn.out_filename);
-            char *suffix = strstr(individual_filename, o->o_suffix);
-            assert(suffix);
+            if (!individual_filename.len)
+                sb_add_buffer(&individual_filename, &tn.base_filename);
 
+            char index_buf[64];
+            int index_len = sprintf(index_buf, "_%05d%s", idx, image_extension); // image_extension can be ".jpg" or ".png"
             if (o->I_individual_thumbnail)
             {
-                sprintf(suffix, "_t_%s_%05d%s", time_str, idx, image_extension);
-                if (save_image(ip, individual_filename, o))
-                    av_log(NULL, AV_LOG_ERROR, "  saving individual shot #%05d to %s failed\n", idx, individual_filename);
+                sb_add_string_len(&individual_filename, "_t_", 3);
+                sb_add_string(&individual_filename, time_str);
+                sb_add_string_len(&individual_filename, index_buf, index_len);
+                if (save_image(ip, individual_filename.s, o))
+                    av_log(NULL, AV_LOG_ERROR, "  saving individual shot #%05d to %s failed\n", idx, individual_filename.s);
+                sb_shrink(&individual_filename, tn.base_filename.len);
             }
 
             if (o->I_individual_original)
             {
-                sprintf(suffix, "_o_%s_%05d%s", time_str, idx, image_extension);
+                sb_add_string_len(&individual_filename, "_o_", 3);
+                sb_add_string(&individual_filename, time_str);
+                sb_add_string_len(&individual_filename, index_buf, index_len);
                 if (save_AVFrame(pFrame, pCodecCtx->width, pCodecCtx->height,
-                    pCodecCtx->pix_fmt, individual_filename, pCodecCtx->width, pCodecCtx->height,
-                    o))
-                {
-                    av_log(NULL, AV_LOG_ERROR, "  saving individual shot #%05d to %s failed\n", idx, individual_filename);
-                }
+                    pCodecCtx->pix_fmt, individual_filename.s, pCodecCtx->width, pCodecCtx->height, o))
+                    av_log(NULL, AV_LOG_ERROR, "  saving individual shot #%05d to %s failed\n", idx, individual_filename.s);
+                sb_shrink(&individual_filename, tn.base_filename.len);
             }
         }
 
@@ -3027,7 +2933,7 @@ int make_thumbnail(const char *file, const struct options *o, int nb_file)
     }
 
     /* save output image */
-    if (save_image(tn.out_ip, tn.out_filename, o) == 0)
+    if (save_image(tn.out_ip, tn.out_filename.s, o) == 0)
         tn.out_saved = 1;
     else
         goto cleanup;
@@ -3035,9 +2941,8 @@ int make_thumbnail(const char *file, const struct options *o, int nb_file)
     int64_t tfinish = get_current_time();
     double diff_time = diff_time_sec(tstart, tfinish);
     // previous version reported # of decoded shots/s; now we report the # of final shots/s
-    //av_log(NULL, AV_LOG_INFO, "  avg. %.2f shots/s; output file: %s\n", nb_shots / diff_time, tn.out_filename);
     av_log(NULL, AV_LOG_INFO, "  %.2f s, %.2f shots/s; output: %s\n",
-        diff_time, (tn.idx + 1) / diff_time, tn.out_filename);
+        diff_time, (tn.idx + 1) / diff_time, tn.out_filename.s);
 
     if (tn.tiles_nr == tn.row * tn.column)
         return_code = 0; // everything is fine
@@ -3082,7 +2987,9 @@ int make_thumbnail(const char *file, const struct options *o, int nb_file)
         avformat_close_input(&pFormatCtx);
 
     thumb_cleanup_dynamic(&tn);
+    sprite_destroy(sprite);
     sb_destroy(&info_buf);
+    sb_destroy(&individual_filename);
     free_conv_result(out_filename);
     free_conv_result(info_filename);
 
@@ -3222,7 +3129,7 @@ int main(int argc, char *argv[])
 {
     int return_code = -1;
 
-    gb_argv0 = path_2_file(argv[0]);
+    gb_argv0 = basename(argv[0]);
     setvbuf(stderr, NULL, _IONBF, 0); // turn off buffering in mingw
 
     gb_st_start = get_current_filetime(); // program start time

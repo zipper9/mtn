@@ -52,6 +52,17 @@ void sb_clear(struct string_buffer *sb)
     }
 }
 
+void sb_shrink(struct string_buffer *sb, int size)
+{
+    assert(size >= 0);
+    if (size < sb->len)
+    {
+        assert(sb->s);
+        sb->s[size] = 0;
+        sb->len = size;
+    }
+}
+
 void sb_init(struct string_buffer *sb)
 {
     memset(sb, 0, sizeof(*sb));
