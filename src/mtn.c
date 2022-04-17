@@ -3112,10 +3112,10 @@ int check_extension(const char *filename)
 {
     static const char *movie_ext[] =
     {
-        "3g2", "3gp", "asf", "avi", "avs", "dat", "divx", "dsm", "evo", "flv", 
-        "m1v", "m2ts", "m2v", "m4a", "mj2", "mjpeg", "mjpg", "mkv", "moov",
-        "mov", "mp4", "mpeg", "mpg", "mpv", "nut", "ogg", "ogm", "qt", "rm", 
-        "rmvb", "swf", "ts", "vob", "webm", "wmv", "xvid"
+        "3g2", "3gp", "asf", "avi", "avs", "divx", "dsm", "evo", "flv", "h264",
+        "m1v", "m2ts", "m2v", "m4v", "mj2", "mjpeg", "mjpg", "mkv", "moov",
+        "mov", "mp4", "mpeg", "mpg", "mpv", "mts", "nut", "ogg", "ogm", "ogv", "qt",
+        "rm",  "rmvb", "swf", "ts", "vob", "webm", "wmv", "xvid"
     };
 
     static const int nb_ext = sizeof(movie_ext) / sizeof(*movie_ext);
@@ -3140,13 +3140,14 @@ struct process_state
     int nb_file;
     int processed;
     int errors;
+    int all_extensions;
 };
 
 static void process_dir_func(void *context, const tchar_t *path)
 {
     struct process_state *ps = (struct process_state *) context;
     const char *converted_path = tchar_to_utf8(path);
-    if (check_extension(converted_path))
+    if (ps->all_extensions || check_extension(converted_path))
     {
         if (make_thumbnail(converted_path, &ps->opt, ++ps->nb_file))
             ps->errors++;
@@ -3163,7 +3164,10 @@ void process_files(struct process_state *ps, char *paths[], int count)
         rem_trailing_slash(paths[i]);
         tchar_t *path = utf8_to_tchar(paths[i]);
         if (is_dir(path))
+        {
+            ps->all_extensions = 0;
             scan_dir(path, process_dir_func, ps, ps->opt.d_depth);
+        }
         else
         {
 #ifdef _WIN32
@@ -3175,6 +3179,7 @@ void process_files(struct process_state *ps, char *paths[], int count)
                     dir = _T(".");
                 else
                     file[-1] = 0;
+                ps->all_extensions = 1;
                 scan_dir_pattern(dir, file, process_dir_func, ps, 0);
             }
             else
