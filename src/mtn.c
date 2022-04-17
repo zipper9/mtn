@@ -73,9 +73,11 @@
 #endif
 
 #ifdef _WIN32
-    #define TEXT_WRITE_MODE _T("wt")
+    #define TEXT_WRITE_MODE   _T("wt")
+    #define BINARY_WRITE_MODE _T("wb")
 #else
-    #define TEXT_WRITE_MODE "w"
+    #define TEXT_WRITE_MODE   "w"
+    #define BINARY_WRITE_MODE "w"
 #endif
 
 #define EDGE_PARTS 6 // # of parts used in edge detection
@@ -577,7 +579,7 @@ int save_image(gdImagePtr ip, const char *outname, const struct options *o)
 {
     int result = -1;
     const tchar_t *tname = utf8_to_tchar(outname);
-    FILE *fp = _tfopen(tname, _TEXT("wb"));
+    FILE *fp = _tfopen(tname, BINARY_WRITE_MODE);
     if (fp)
     {
         const char *image_extension = strrchr(outname, '.');
@@ -2017,35 +2019,32 @@ gdImagePtr rotate_gdImage(gdImagePtr ip, int angle)
 /*
  * Find and extract album art / cover image
  */
-void
-save_cover_image(AVFormatContext *s, const char* cover_filename)
+void save_cover_image(const AVFormatContext *s, const char* cover_filename)
 {
     int cover_stream_idx = -1;
     unsigned int i;
 
     // find first stream with cover art
     for (i = 0; i < s->nb_streams; i++)
-    {
         if (s->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO &&
             (s->streams[i]->disposition & AV_DISPOSITION_ATTACHED_PIC))
         {
-            cover_stream_idx  = (int)i;
+            cover_stream_idx = i;
             break;
         }
-    }
 
-    if(cover_stream_idx > -1)
+    if (cover_stream_idx > -1)
     {
-        AVPacket pkt = s->streams[cover_stream_idx]->attached_pic;
-
-        if(pkt.data && pkt.size > 0)
+        const AVPacket *pkt = &s->streams[cover_stream_idx]->attached_pic;
+        if (pkt->data && pkt->size > 0)
         {
             av_log(NULL, AV_LOG_VERBOSE, "Found cover art in stream index %d.\n", cover_stream_idx);
-
-            FILE* image_file = fopen(cover_filename, "wb");
-            if(image_file)
+            const tchar_t *cover_filename_w = utf8_to_tchar(cover_filename);
+            FILE *image_file = _tfopen(cover_filename_w, BINARY_WRITE_MODE);
+            free_conv_result((tchar_t *) cover_filename_w);
+            if (image_file)
             {
-                fwrite(pkt.data, pkt.size, 1, image_file);
+                fwrite(pkt->data, pkt->size, 1, image_file);
                 fclose(image_file);
             }
             else
