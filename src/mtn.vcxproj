@@ -177,6 +177,7 @@
     <ClCompile Include="mtn.c" />
     <ClCompile Include="options.c" />
     <ClCompile Include="scan_dir_win.c" />
+    <ClCompile Include="string_buffer.c" />
     <ClCompile Include="utf8_win.c" />
   </ItemGroup>
   <ItemGroup>
@@ -186,6 +187,7 @@
     <ClInclude Include="measure_time.h" />
     <ClInclude Include="options.h" />
     <ClInclude Include="scan_dir.h" />
+    <ClInclude Include="string_buffer.h" />
     <ClInclude Include="utf8_win.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

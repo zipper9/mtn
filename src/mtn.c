@@ -48,6 +48,7 @@
 #include "file_utils.h"
 #include "measure_time.h"
 #include "scan_dir.h"
+#include "string_buffer.h"
 
 #include <libavutil/imgutils.h>
 #include <libavutil/avutil.h>
@@ -1276,34 +1277,41 @@ AVCodecContext* get_codecContext_from_codecParams(AVCodecParameters* pCodecPar)
 /*
 modified from libavformat's dump_format
 */
-void get_stream_info_type(AVFormatContext *ic, enum AVMediaType type, char *buf, AVRational sample_aspect_ratio, int verbose)
+void get_stream_info_type(struct string_buffer *sb, const AVFormatContext *ic, enum AVMediaType type, AVRational sample_aspect_ratio, int verbose)
 {
-    char sub_buf[1024] = {'\0',}; //FIXME char sub_buf[1024]
     unsigned int i;
-    AVCodecContext *pCodexCtx=NULL;
-    char subtitles_separator[3] = {'\0',};
+    struct string_buffer sb_sub;
+    AVCodecContext *pCodexCtx = NULL;
+    char subtitles_separator[3] = { 0, };
     KeyCounter *kc = kc_new();
+    char tmp_buf[256];
 
-    for(i=0; i<ic->nb_streams; i++) {
-        char codec_buf[256];
+    sb_init(&sb_sub);
+
+    for (i = 0; i < ic->nb_streams; i++)
+    {
         int flags = ic->iformat->flags;
-        AVStream *st = ic->streams[i];
-        AVDictionaryEntry *language = av_dict_get(st->metadata, "language", NULL, 0);
+        const AVStream *st = ic->streams[i];
+        const AVDictionaryEntry *language = av_dict_get(st->metadata, "language", NULL, 0);
 
-        if (type != st->codecpar->codec_type) {
+        if (type != st->codecpar->codec_type)
             continue;
-        }
 
         pCodexCtx = get_codecContext_from_codecParams(st->codecpar);
 
-        if (AVMEDIA_TYPE_SUBTITLE  == st->codecpar->codec_type) {
-            if (language != NULL) {
-                AVDictionaryEntry *subentry_title = av_dict_get(st->metadata, "title", NULL, 0);
-                if(subentry_title && strcasecmp(subentry_title->value, "sub"))
-                    sprintf(sub_buf + strlen(sub_buf), "%s%s (%s)", subtitles_separator, language->value, subentry_title->value);
-                else
-                    sprintf(sub_buf + strlen(sub_buf), "%s%s", subtitles_separator, language->value);
-
+        if (st->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE)
+        {
+            if (language)
+            {
+                const AVDictionaryEntry *subentry_title = av_dict_get(st->metadata, "title", NULL, 0);
+                sb_add_string(&sb_sub, subtitles_separator);
+                sb_add_string(&sb_sub, language->value);
+                if (subentry_title && strcasecmp(subentry_title->value, "sub"))
+                {
+                    sb_add_string(&sb_sub, " (");
+                    sb_add_string(&sb_sub, subentry_title->value);
+                    sb_add_char(&sb_sub, ')');
+                }
                 strcpy(subtitles_separator, ", ");
             }
             else
@@ -1314,27 +1322,28 @@ void get_stream_info_type(AVFormatContext *ic, enum AVMediaType type, char *buf,
             continue;
         }
 
-        strcat(buf, "\n");
+        sb_add_char(sb, '\n');
 
         if (verbose)
         {
-            sprintf(buf + strlen(buf), "Stream %d", i);
+            int len = sprintf(tmp_buf, "Stream %d", i);
             if (flags & AVFMT_SHOW_IDS)
-                sprintf(buf + strlen(buf), "[0x%x]", st->id);
+                len += sprintf(tmp_buf + len, "[0x%x]", st->id);
 
             /*
             int g = ff_gcd(st->time_base.num, st->time_base.den);
-            sprintf(buf + strlen(buf), ", %d/%d", st->time_base.num/g, st->time_base.den/g);
+            len += sprintf(tmp_buf + len, ", %d/%d", st->time_base.num/g, st->time_base.den/g);
             */
-            sprintf(buf + strlen(buf), ": ");
+            sb_add_string_len(sb, tmp_buf, len);
+            sb_add_string(sb, ": ");
         }
 
-        avcodec_string(codec_buf, sizeof(codec_buf), pCodexCtx, 0);
+        avcodec_string(tmp_buf, sizeof(tmp_buf), pCodexCtx, 0);
 
 /* re-enable SAR & DAR
         // remove [SAR DAR] from string, it's not very useful.
         char *begin = NULL, *end = NULL;
-        if ((begin=strstr(codec_buf, " [SAR")) != NULL
+        if ((begin=strstr(tmp_buf, " [SAR")) != NULL
             && (end=strchr(begin, ']')) != NULL) {
             while (*++end != '\0') {
                 *begin++ = *end;
@@ -1342,31 +1351,32 @@ void get_stream_info_type(AVFormatContext *ic, enum AVMediaType type, char *buf,
             *begin = '\0';
         }
 */
-        strcat(buf, codec_buf);
+        sb_add_string(sb, tmp_buf);
 
         /* if bitrate is missing, try to search elsewhere */
         if ((st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO ||
              st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) &&
              st->codecpar->bit_rate <= 0)
         {
-            char bitratebuff[100];
             long metadata_bitrate = get_bitrate_from_metadata(st->metadata);
-
             if (metadata_bitrate > 0)
             {
                 char *formated_bitrate_size = format_size_f(metadata_bitrate);
-                snprintf(bitratebuff, sizeof(bitratebuff),", %s/s", formated_bitrate_size);
-                strcat(buf, bitratebuff);
+                sb_add_string(sb, ", ");
+                sb_add_string(sb, formated_bitrate_size);
+                sb_add_string(sb, "/s");
                 free(formated_bitrate_size);
             }
         }
 
         if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO)
         {
+            int len;
             if (st->r_frame_rate.den && st->r_frame_rate.num)
-                sprintf(buf + strlen(buf), ", %5.2f fps(r)", av_q2d(st->r_frame_rate));
+                len = sprintf(tmp_buf, ", %5.2f fps(r)", av_q2d(st->r_frame_rate));
             else
-                sprintf(buf + strlen(buf), ", %5.2f fps(c)", 1/av_q2d(st->time_base));
+                len = sprintf(tmp_buf, ", %5.2f fps(c)", 1/av_q2d(st->time_base));
+            sb_add_string_len(sb, tmp_buf, len);
 
             // show aspect ratio
             int scaled_src_width, scaled_src_height;
@@ -1374,46 +1384,51 @@ void get_stream_info_type(AVFormatContext *ic, enum AVMediaType type, char *buf,
             calc_scale_src(st->codecpar->width, st->codecpar->height, sample_aspect_ratio,
                 &scaled_src_width, &scaled_src_height);
 
-            if (scaled_src_width != st->codecpar->width || scaled_src_height != st->codecpar->height) {
-                sprintf(buf + strlen(buf), " => %dx%d", scaled_src_width, scaled_src_height);
+            if (scaled_src_width != st->codecpar->width || scaled_src_height != st->codecpar->height)
+            {
+                len = sprintf(tmp_buf, " => %dx%d", scaled_src_width, scaled_src_height);
+                sb_add_string_len(sb, tmp_buf, len);
             }
         }
         if (language)
-            sprintf(buf + strlen(buf), " (%s)", language->value);
+        {
+            sb_add_string(sb, " (");
+            sb_add_string(sb, language->value);
+            sb_add_char(sb, ')');
+        }
     } //for
 
-    if (*sub_buf || kc->count > 0)
-        strcat(buf, "\nSubtitles: ");
+    if (sb_sub.len || kc->count > 0)
+        sb_add_string(sb, "\nSubtitles: ");
 
-    if (*sub_buf)
+    if (sb_sub.len)
     {
-        strcat(buf, sub_buf);
+        sb_add_buffer(sb, &sb_sub);
         if (kc->count > 0)
-            strcat(buf, ", ");
+            sb_add_string(sb, ", ");
     }
 
     int j;
     for (j = 0; j < kc->count; j++)
     {
+        sb_add_string(sb, kc->key[j].name);
         if (kc->count > 1)
-            sprintf(buf + strlen(buf), "%s (%dx)", kc->key[j].name, kc->key[j].count);
-        else
-            sprintf(buf + strlen(buf), "%s", kc->key[j].name);
+            sb_add_string_len(sb, tmp_buf, sprintf(tmp_buf, " (%dx)", kc->key[j].count));
     }
 
     if (pCodexCtx)
         avcodec_free_context(&pCodexCtx);
 
     kc_destroy(&kc);
+    sb_destroy(&sb_sub);
 }
-
 
 /*
 modified from libavformat's dump_format
 */
-char *get_stream_info(AVFormatContext *ic, const char *url, int strip_path, AVRational sample_aspect_ratio, const struct options *o)
+void get_stream_info(struct string_buffer *sb, const AVFormatContext *ic, const char *url, int strip_path, AVRational sample_aspect_ratio, const struct options *o)
 {
-    static char buf[4096]; // FIXME: this is also used for all text at the top
+    char tmp_buf[256];
     int duration = -1;
 
     const char *file_name = url;
@@ -1422,17 +1437,21 @@ char *get_stream_info(AVFormatContext *ic, const char *url, int strip_path, AVRa
 
     int64_t file_size = avio_size(ic->pb);
 
-    sprintf(buf, "File: %s", file_name);
-    /* file format
-    sprintf(buf + strlen(buf), " (%s)", ic->iformat->name);*/
+    sb_add_string(sb, "File: ");
+    sb_add_string(sb, file_name);
 
+    /* file format
+    sprintf(buf + strlen(buf), " (%s)", ic->iformat->name);
+    */
+
+    int len;
     if (o->H_human_filesize)
         /* File size only in MiB, GiB, ... */
-        sprintf(buf + strlen(buf), "\nSize: %s", format_size(file_size));
+        len = sprintf(tmp_buf, "\nSize: %s", format_size(file_size));
     else
         /* File size i bytes and MiB */
-        sprintf(buf + strlen(buf), "\nSize: %"PRId64" bytes (%s)", file_size, format_size(file_size));
-
+        len = sprintf(tmp_buf, "\nSize: %"PRId64" bytes (%s)", file_size, format_size(file_size));
+    sb_add_string_len(sb, tmp_buf, len);
 
     if (ic->duration != AV_NOPTS_VALUE)
     {
@@ -1442,38 +1461,35 @@ char *get_stream_info(AVFormatContext *ic, const char *url, int strip_path, AVRa
         secs %= 60;
         hours = mins / 60;
         mins %= 60;
-        sprintf(buf + strlen(buf), ", duration: %02d:%02d:%02d", hours, mins, secs);
-    } else
-        sprintf(buf + strlen(buf), ", duration: N/A");
+        sb_add_string_len(sb, tmp_buf, sprintf(tmp_buf, ", duration: %02d:%02d:%02d", hours, mins, secs));
+    }
+    else
+        sb_add_string(sb, ", duration: N/A");
 
-    /*
+#if 0
     if (ic->start_time != AV_NOPTS_VALUE)
     {
         int secs, us;
         secs = ic->start_time / AV_TIME_BASE;
         us = ic->start_time % AV_TIME_BASE;
-        sprintf(buf + strlen(buf), ", start: %d.%06d", secs, (int)av_rescale(us, 1000000, AV_TIME_BASE));
+        sb_add_string_len(sb, tmp_buf, sprintf(tmp_buf, ", start: %d.%06d", secs, (int)av_rescale(us, 1000000, AV_TIME_BASE)));
     }
-    */
+#endif
 
     // some formats, eg. flv, dont seem to support bit_rate, so we'll prefer to 
     // calculate from duration.
     // is this ok? probably not ok with .vob files when duration is wrong. DEBUG
 
-
     if (ic->bit_rate)
-        sprintf(buf + strlen(buf), ", bitrate: %"PRId64" kb/s", ic->bit_rate / 1000);
+        sb_add_string_len(sb, tmp_buf, sprintf(tmp_buf, ", bitrate: %"PRId64" kb/s", ic->bit_rate / 1000));
     else if (duration > 0)
-        sprintf(buf + strlen(buf), ", avg.bitrate: %.0f kb/s", (double) file_size * 8.0 / duration / 1000);
+        sb_add_string_len(sb, tmp_buf, sprintf(tmp_buf, ", avg.bitrate: %.0f kb/s", (double) file_size * 8.0 / duration / 1000));
     else
-        strcat(buf, ", bitrate: N/A");
+        sb_add_string(sb, ", bitrate: N/A");
 
-    get_stream_info_type(ic, AVMEDIA_TYPE_AUDIO,    buf, sample_aspect_ratio, o->v_verbose);
-    get_stream_info_type(ic, AVMEDIA_TYPE_VIDEO,    buf, sample_aspect_ratio, o->v_verbose);
-    get_stream_info_type(ic, AVMEDIA_TYPE_SUBTITLE, buf, sample_aspect_ratio, o->v_verbose);
-
-    //strfmon(buf + strlen(buf), 100, "strfmon: %!i\n", avio_size(ic->pb));
-    return buf;
+    get_stream_info_type(sb, ic, AVMEDIA_TYPE_AUDIO,    sample_aspect_ratio, o->v_verbose);
+    get_stream_info_type(sb, ic, AVMEDIA_TYPE_VIDEO,    sample_aspect_ratio, o->v_verbose);
+    get_stream_info_type(sb, ic, AVMEDIA_TYPE_SUBTITLE, sample_aspect_ratio, o->v_verbose);
 }
 
 void dump_format_context(AVFormatContext *p, int index, const char *url, int is_output,  const struct options *o)
@@ -1485,7 +1501,11 @@ void dump_format_context(AVFormatContext *p, int index, const char *url, int is_
     //dump_format(p, index, url, is_output);
 
     // dont show scaling info at this time because we dont have the proper sample_aspect_ratio
-    av_log(NULL, AV_LOG_INFO, "%s\n", get_stream_info(p, url, 0, GB_A_RATIO, o));
+    struct string_buffer sb;
+    sb_init(&sb);
+    get_stream_info(&sb, p, url, 0, GB_A_RATIO, o);
+    av_log(NULL, AV_LOG_INFO, "%s\n", sb.s);
+    sb_destroy(&sb);
 
     av_log(NULL, AV_LOG_VERBOSE, "start_time av: %"PRId64", duration av: %"PRId64"\n",
         p->start_time, p->duration);
@@ -1501,21 +1521,21 @@ void dump_format_context(AVFormatContext *p, int index, const char *url, int is_
     AVDictionaryEntry* year     = av_dict_get(p->metadata, "year",      NULL, 0);
     AVDictionaryEntry* genre    = av_dict_get(p->metadata, "genre",     NULL, 0);
 
-    if (track != NULL)
+    if (track)
         av_log(NULL, AV_LOG_INFO, "  Track: %s\n",     track->value);
-    if (title != NULL)
+    if (title)
         av_log(NULL, AV_LOG_INFO, "  Title: %s\n",     title->value);
-    if (author != NULL)
+    if (author)
         av_log(NULL, AV_LOG_INFO, "  Author: %s\n",    author->value);
-    if (copyright != NULL)
+    if (copyright)
         av_log(NULL, AV_LOG_INFO, "  Copyright: %s\n", copyright->value);
-    if (comment != NULL)
+    if (comment)
         av_log(NULL, AV_LOG_INFO, "  Comment: %s\n",   comment->value);
-    if (album != NULL)
+    if (album)
         av_log(NULL, AV_LOG_INFO, "  Album: %s\n",     album->value);
-    if (year != NULL)
+    if (year)
         av_log(NULL, AV_LOG_INFO, "  Year: %s\n",      year->value);
-    if (genre != NULL)
+    if (genre)
         av_log(NULL, AV_LOG_INFO, "  Genre: %s\n",     genre->value);
 }
 
@@ -2141,6 +2161,9 @@ int make_thumbnail(const char *file, const struct options *o, int nb_file)
     thumbnail tn; // thumbnail data & info
     thumb_new(&tn);
 
+    struct string_buffer info_buf;
+    sb_init(&info_buf);
+    
     pSprite sprite = NULL;
     
     gdImagePtr thumbShadowIm = NULL;
@@ -2192,7 +2215,7 @@ int make_thumbnail(const char *file, const struct options *o, int nb_file)
         strcpy(tn.out_filename, filenamebase);
         strcat(tn.out_filename, o->o_suffix);
 
-        if (o->N_suffix)
+        if (o->N_suffix && *o->N_suffix)
         {
             strcpy(tn.info_filename, filenamebase);
             strcat(tn.info_filename, o->N_suffix);
@@ -2214,7 +2237,8 @@ int make_thumbnail(const char *file, const struct options *o, int nb_file)
         image_extension = IMAGE_EXTENSION_JPG;
 
     out_filename = utf8_to_tchar(tn.out_filename);
-    info_filename = utf8_to_tchar(tn.info_filename);
+    if (o->N_suffix && *o->N_suffix)
+        info_filename = utf8_to_tchar(tn.info_filename);
     
 #if 0
     // if output files exist and modified time >= program start time,
@@ -2243,14 +2267,14 @@ int make_thumbnail(const char *file, const struct options *o, int nb_file)
             return_code = 0;
             goto cleanup;
         }
-        if (o->N_suffix && is_reg(info_filename))
+        if (info_filename && is_reg(info_filename))
         {
             av_log(NULL, AV_LOG_INFO, "%s: info file %s already exists. omitted.\n", gb_argv0, tn.info_filename);
             return_code = 0;
             goto cleanup;
         }
     }
-    if (o->N_suffix)
+    if (info_filename)
     {
         av_log(NULL, AV_LOG_INFO, "\nCreating info file %s\n", tn.info_filename);
         info_fp = _tfopen(info_filename, TEXT_WRITE_MODE);
@@ -2512,22 +2536,30 @@ int make_thumbnail(const char *file, const struct options *o, int nb_file)
         av_log(NULL, AV_LOG_INFO, "  changing # of column to %d to meet minimum height of %d; see -h option\n", tn.column, o->h_height);
     if (o->w_width > 0 && o->w_width != tn.img_width)
         av_log(NULL, AV_LOG_INFO, "  changing width to %d to match movie's size (%dx%d)\n", tn.img_width, scaled_src_width, tn.column);
-    char *all_text = get_stream_info(pFormatCtx, file, 1, sample_aspect_ratio, o); // FIXME: using function's static buffer
+    if (info_fp || o->i_info)
+        get_stream_info(&info_buf, pFormatCtx, file, 1, sample_aspect_ratio, o);
     if (info_fp)
-        fprintf(info_fp, "%s\n", all_text);
-    if (!o->i_info)
-        *all_text = '\0';
-    if (o->T_text)
     {
-        sprintf(all_text+strlen(all_text), "\n%s", o->T_text);
+        fputs(info_buf.s, info_fp);
+        fputc('\n', info_fp);
+    }
+    if (!o->i_info)
+        sb_clear(&info_buf);
+    if (o->T_text && *o->T_text)
+    {
+        sb_add_char(&info_buf, '\n');
+        sb_add_string(&info_buf, o->T_text);
         if (info_fp)
-            fprintf(info_fp, "%s\n", o->T_text);
+        {
+            fputs(o->T_text, info_fp);
+            fputc('\n', info_fp);
+        }
     }
 
     const int info_text_padding = image_string_padding(o->f_fontname, o->F_info_font_size);
 
     if (o->i_info)
-        tn.txt_height = image_string_height(all_text, o->f_fontname, o->F_info_font_size) + o->g_gap + info_text_padding;
+        tn.txt_height = image_string_height(info_buf.s, o->f_fontname, o->F_info_font_size) + o->g_gap + info_text_padding;
     tn.img_height = tn.shot_height_out*tn.row + o->g_gap*(tn.row+1) + tn.txt_height;
     av_log(NULL, AV_LOG_INFO, "  step: %.1f s; # tiles: %dx%d, tile size: %dx%d; total size: %dx%d\n",
         tn.step_t*tn.time_base, tn.column, tn.row, tn.shot_width_out, tn.shot_height_out, tn.img_width, tn.img_height);
@@ -2604,14 +2636,14 @@ int make_thumbnail(const char *file, const struct options *o, int nb_file)
         gdImageColorTransparent(tn.out_ip, background);
 
     /* add info & text */ // do this early so when font is not found we'll quit early
-    if (all_text && *all_text)
+    if (info_buf.len)
     {
-        char *str_ret = image_string(tn.out_ip,
+        char *error = image_string(tn.out_ip,
             o->f_fontname, o->F_info_color, o->F_info_font_size,
-            o->L_info_location, o->g_gap, all_text, 0, COLOR_WHITE, info_text_padding);
-        if (str_ret)
+            o->L_info_location, o->g_gap, info_buf.s, 0, COLOR_WHITE, info_text_padding);
+        if (error)
         {
-            av_log(NULL, AV_LOG_ERROR, "  %s; font problem? see -f option\n", str_ret);
+            av_log(NULL, AV_LOG_ERROR, "  %s; font problem? see -f option\n", error);
             goto cleanup;
         }
     }
@@ -2879,8 +2911,8 @@ int make_thumbnail(const char *file, const struct options *o, int nb_file)
             /* stamp idx & blank & edge for debugging */
             if (o->v_verbose)
             {
-                char idx_str[1000]; // FIXME
-                sprintf(idx_str, "idx: %d, blank: %.2f\n%.6f  %.6f\n%.6f  %.6f\n%.6f  %.6f", 
+                char idx_str[1024];
+                snprintf(idx_str, sizeof(idx_str), "idx: %d, blank: %.2f\n%.6f  %.6f\n%.6f  %.6f\n%.6f  %.6f",
                     idx, blank, edge[0], edge[1], edge[2], edge[3], edge[4], edge[5]);
                 image_string(ip, o->f_fontname, COLOR_WHITE, o->F_ts_font_size, 2, 0, idx_str, 1, COLOR_BLACK, 0);
             }
@@ -3051,9 +3083,10 @@ int make_thumbnail(const char *file, const struct options *o, int nb_file)
         avformat_close_input(&pFormatCtx);
 
     thumb_cleanup_dynamic(&tn);
+    sb_destroy(&info_buf);
     free_conv_result(out_filename);
     free_conv_result(info_filename);
-    
+
     av_log(NULL, AV_LOG_VERBOSE, "make_thumbnail: done\n");
     return return_code;
 }

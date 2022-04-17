@@ -34,7 +34,7 @@ S_LIBS= -static-libgcc -static \
 	$(LIBSDIR)/libgd/Bin/libgd.a \
 	-lfreetype -ljpeg -lpng16 -lz -lm
 
-OBJ = mtn.c file_utils.c measure_time.c options.c scan_dir_posix.c
+OBJ = mtn.c file_utils.c measure_time.c options.c scan_dir_posix.c string_buffer.c
 
 mtn: $(OBJ) outdir
 	$(CC) -o $(OUT)/mtn $(OBJ) $(INCPATH) $(CFLAGS) $(LIBS)
