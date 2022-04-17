@@ -175,6 +175,7 @@
     <ClCompile Include="file_utils.c" />
     <ClCompile Include="measure_time.c" />
     <ClCompile Include="mtn.c" />
+    <ClCompile Include="options.c" />
     <ClCompile Include="scan_dir_win.c" />
     <ClCompile Include="utf8_win.c" />
   </ItemGroup>
@@ -183,6 +184,7 @@
     <ClInclude Include="fake_tchar.h" />
     <ClInclude Include="file_utils.h" />
     <ClInclude Include="measure_time.h" />
+    <ClInclude Include="options.h" />
     <ClInclude Include="scan_dir.h" />
     <ClInclude Include="utf8_win.h" />
   </ItemGroup>
