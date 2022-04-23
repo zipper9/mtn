@@ -82,8 +82,6 @@
 #define EDGE_PARTS 6 // # of parts used in edge detection
 #define EDGE_FOUND 0.001f // edge is considered found
 
-typedef char TIME_STR[20];
-
 #define IMAGE_EXTENSION_JPG ".jpg"
 #define IMAGE_EXTENSION_PNG ".png"
 #define LIBGD_FONT_HEIGHT_CORRECTION 1
@@ -254,85 +252,80 @@ char *strlaststr (char *haystack, char *needle)
     return prev;
 }
 
-void format_time(double duration, TIME_STR str, char sep)
+char *format_time(double duration, char out[], size_t out_size, char sep)
 {
-    if (duration < 0) {
-        sprintf(str, "N/A");
-    } else {
-        int hours, mins, secs;
-        secs = (int) duration;
-        mins = secs / 60;
-        secs %= 60;
-        hours = mins / 60;
-        mins %= 60;
-
-        snprintf(str, sizeof(TIME_STR), "%02d%c%02d%c%02d", hours, sep, mins, sep, secs);
-    }
-}
-
-void format_pts(int64_t pts, double time_base, TIME_STR str)
-{
-    if (pts < 0) {
-        sprintf(str, "N/A");
-    } else {
-        int hours, mins, secs, msec;
-        double time_stamp = pts * time_base;
-        secs = (int) time_stamp;
-        msec = (int) ((time_stamp - secs) * 1000);
-        mins = secs / 60;
-        secs %= 60;
-        hours = mins / 60;
-        mins %= 60;
-
-        snprintf(str, sizeof(TIME_STR), "%02d:%02d:%02d.%03d", hours, mins, secs, msec);
-    }
-}
-
-char *format_size(int64_t size)
-{
-    static char buf[23]; // FIXME
-    char unit[]="B";
-
-    if (size < 1024) {
-        sprintf(buf, "%"PRId64" %s", size, unit);
-    } else if (size < 1024*1024) {
-        sprintf(buf, "%.0f ki%s", size/1024.0, unit);
-    } else if (size < 1024*1024*1024) {
-        sprintf(buf, "%.0f Mi%s", size/1024.0/1024, unit);
-    } else {
-        sprintf(buf, "%.1f Gi%s", size/1024.0/1024/1024, unit);
-    }
-    return buf;
-}
-/*
- * size: number of bites
- * Returnes formated string in b, kb, Mb or Gb.
- * Caller must free returned resource.
- */
-char *format_size_f(int64_t size)
-{
-    char *buf = NULL;
-    int bufflength;
-    int needToPrint = 20;
-    char unit[]="b";
-
-    do
+    assert(out_size);
+    if (out_size < 4)
     {
-        bufflength = needToPrint+1;
-        buf = realloc(buf, bufflength);
+        out[0] = 0;
+        return out;
+    }
+    if (duration < 0)
+    {
+        strcpy(out, "N/A");
+        return out;
+    }
+    int hours, mins, secs;
+    secs = (int) duration;
+    mins = secs / 60;
+    secs %= 60;
+    hours = mins / 60;
+    mins %= 60;
+    snprintf(out, out_size, "%02d%c%02d%c%02d", hours, sep, mins, sep, secs);
+    return out;
+}
 
-        if (size < 1200) {
-            needToPrint = snprintf(buf, bufflength,"%"PRId64" %s", size, unit);
-        } else if (size < (int64_t)10000*1000) {
-            needToPrint = snprintf(buf, bufflength,"%.0f k%s", size/1000.0, unit);
-        } else if (size < (int64_t)10000*1000*1000) {
-            needToPrint = snprintf(buf, bufflength,"%.0f M%s", size/1000.0/1000, unit);
-        } else {
-            needToPrint = snprintf(buf, bufflength,"%.1f G%s", size/1000.0/1000/1000, unit);
-        }
-    } while (needToPrint >= bufflength);
+char *format_pts(int64_t pts, double time_base, char out[], size_t out_size)
+{
+    assert(out_size);
+    if (out_size < 4)
+    {
+        out[0] = 0;
+        return out;
+    }
+    if (pts < 0)
+    {
+        strcpy(out, "N/A");
+        return out;
+    }
+    int hours, mins, secs, msec;
+    double time_stamp = pts * time_base;
+    secs = (int) time_stamp;
+    msec = (int) ((time_stamp - secs) * 1000);
+    mins = secs / 60;
+    secs %= 60;
+    hours = mins / 60;
+    mins %= 60;
+    snprintf(out, out_size, "%02d:%02d:%02d.%03d", hours, mins, secs, msec);
+    return out;
+}
 
-    return buf;
+char *format_size(int64_t size, char out[], size_t out_size)
+{
+    assert(out_size);
+    if (size < 1024)
+        snprintf(out, out_size, "%d B", (int) size);
+    else if (size < 1024*1024)
+        snprintf(out, out_size, "%.0f kiB", size/1024.0);
+    else if (size < 1024*1024*1024)
+        snprintf(out, out_size, "%.0f MiB", size/(1024.0*1024));
+    else
+        snprintf(out, out_size, "%.1f GiB", size/(1024.0*1024*1024));
+    return out;
+}
+
+char *format_size_f(int64_t size, char out[], size_t out_size)
+{
+    assert(out_size);
+    if (size < 1200)
+        snprintf(out, out_size, "%d b", (int) size);
+    else if (size < 1024*1024)
+        snprintf(out, out_size, "%.0f kb", size/1000.0);
+    else if (size < 1024*1024*1024)
+        snprintf(out, out_size, "%.0f Mb", size/(1000.0*1000));
+    else
+        snprintf(out, out_size, "%.1f Gb", size/(1000.0*1000*1000));
+    return out;
 }
 
 char *rem_trailing_slash(char *str)
@@ -627,7 +620,7 @@ void sprite_add_shot(struct sprite *s, gdImagePtr ip, int64_t pts, const struct 
     int posY = rows_used * s->h;
     int posX = cols_used * s->w;
 
-    TIME_STR time_from, time_to;
+    char time_from[64], time_to[64];
     int64_t pts_from = s->last_shot_pts;
     int64_t pts_to = pts + s->parent->step_t / 2;
 
@@ -641,11 +634,11 @@ void sprite_add_shot(struct sprite *s, gdImagePtr ip, int64_t pts, const struct 
     }
 
     if (very_first_shot)
-        format_pts(0, s->parent->time_base, time_from);
+        format_pts(0, s->parent->time_base, time_from, sizeof(time_from));
     else
-        format_pts(pts_from, s->parent->time_base, time_from);
+        format_pts(pts_from, s->parent->time_base, time_from, sizeof(time_from));
 
-    format_pts(pts_to, s->parent->time_base, time_to);
+    format_pts(pts_to, s->parent->time_base, time_to, sizeof(time_to));
 
     sb_add_string(&s->vtt_content, "\n\n");
     sb_add_string(&s->vtt_content, time_from);
@@ -1273,11 +1266,10 @@ void get_stream_info_type(struct string_buffer *sb, const AVFormatContext *ic, e
             long metadata_bitrate = get_bitrate_from_metadata(st->metadata);
             if (metadata_bitrate > 0)
             {
-                char *formated_bitrate_size = format_size_f(metadata_bitrate);
+                char formated_bitrate[64];
                 sb_add_string(sb, ", ");
-                sb_add_string(sb, formated_bitrate_size);
+                sb_add_string(sb, format_size_f(metadata_bitrate, formated_bitrate, sizeof(formated_bitrate)));
                 sb_add_string(sb, "/s");
-                free(formated_bitrate_size);
             }
         }
 
@@ -1341,6 +1333,7 @@ modified from libavformat's dump_format
 void get_stream_info(struct string_buffer *sb, const AVFormatContext *ic, const char *url, int strip_path, AVRational sample_aspect_ratio, const struct options *o)
 {
     char tmp_buf[256];
+    char size_buf[64];
     int duration = -1;
 
     const char *file_name = url;
@@ -1356,13 +1349,14 @@ void get_stream_info(struct string_buffer *sb, const AVFormatContext *ic, const 
     sprintf(buf + strlen(buf), " (%s)", ic->iformat->name);
     */
 
+    format_size(file_size, size_buf, sizeof(size_buf));
     int len;
     if (o->H_human_filesize)
         /* File size only in MiB, GiB, ... */
-        len = sprintf(tmp_buf, "\nSize: %s", format_size(file_size));
+        len = sprintf(tmp_buf, "\nSize: %s", size_buf);
     else
         /* File size i bytes and MiB */
-        len = sprintf(tmp_buf, "\nSize: %"PRId64" bytes (%s)", file_size, format_size(file_size));
+        len = sprintf(tmp_buf, "\nSize: %"PRId64" bytes (%s)", file_size, size_buf);
     sb_add_string_len(sb, tmp_buf, len);
 
     if (ic->duration != AV_NOPTS_VALUE)
@@ -1450,21 +1444,17 @@ void dump_format_context(AVFormatContext *p, int index, const char *url, const s
         av_log(NULL, AV_LOG_INFO, "  Genre: %s\n",     genre->value);
 }
 
-/*
-*/
-double uint8_cmp(uint8_t *pa, uint8_t *pb, uint8_t *pc, int n)
+double uint8_cmp(const uint8_t *pa, const uint8_t *pb, const uint8_t *pc, int n)
 {
     int i, same = 0;
-    for (i=0; i<n; i++) {
+    for (i = 0; i < n; i++)
+    {
         int diffab = pa[i] - pb[i];
         int diffac = pa[i] - pc[i];
-        int diffbc = pb[i] - pb[i];
+        int diffbc = pb[i] - pc[i];
 
-        if ((diffab > -20) && (diffab < 20) &&
-            (diffac > -20) && (diffac < 20) &&
-            (diffbc > -20) && (diffbc < 20)) {
+        if (abs(diffab) < 20 && abs(diffac) < 20 && abs(diffbc) < 20)
             same++;
-        }
     }
     return (double)same / n;
 }
@@ -1600,8 +1590,8 @@ video_decode_next_frame(AVFormatContext *pFormatCtx,
             fret = av_read_frame(pFormatCtx, pkt);
             if (fret)
             {
-                av_log(NULL, AV_LOG_VERBOSE, "av_read_frame returned %d - considering as the end of file\n", fret);
-                av_log(NULL, AV_LOG_ERROR, "Error reading from video file\n");
+                char errbuf[256];
+                av_log(NULL, AV_LOG_ERROR, "Error reading from video file: %s\n", av_make_error_string(errbuf, sizeof(errbuf), fret));
                 return 0;
             }
         } while (pkt->stream_index != video_index);
@@ -1758,18 +1748,17 @@ double guess_duration(AVFormatContext *pFormatCtx, int index, AVCodecContext *pC
 try hard to seek
 assume flags can be either 0 or AVSEEK_FLAG_BACKWARD
 */
-int really_seek(AVFormatContext *pFormatCtx, int index, int64_t timestamp, int flags, double duration)
+int really_seek(AVFormatContext *pFormatCtx, int index, int64_t timestamp, double duration)
 {
-    assert(flags == 0 || flags == AVSEEK_FLAG_BACKWARD);
     int ret;
 
     /* first try av_seek_frame */
-    ret = av_seek_frame(pFormatCtx, index, timestamp, flags);
+    ret = av_seek_frame(pFormatCtx, index, timestamp, 0);
     if (ret >= 0) // success
         return ret;
 
     /* then we try seeking to any (non key) frame AVSEEK_FLAG_ANY */
-    ret = av_seek_frame(pFormatCtx, index, timestamp, flags | AVSEEK_FLAG_ANY);
+    ret = av_seek_frame(pFormatCtx, index, timestamp, AVSEEK_FLAG_ANY);
     if (ret >= 0) // success
     {
         av_log(NULL, AV_LOG_INFO, "AVSEEK_FLAG_ANY: timestamp: %"PRId64"\n", timestamp); // DEBUG
@@ -2583,7 +2572,6 @@ int make_thumbnail(const char *file, const struct options *o, int nb_file)
 
     int evade_try = 0; // blank screen evasion index
     double avg_evade_try = 0; // average
-    int direction = 0; // seek direction (seek flags)
     seek_target = tn.step_t + (int64_t) ((start_time + o->B_begin) / tn.time_base);
     idx = 0; // idx = thumb_idx
     thumb_nb = tn.row * tn.column; // thumb_nb = # of shots we need
@@ -2595,8 +2583,8 @@ int make_thumbnail(const char *file, const struct options *o, int nb_file)
     {
         int64_t eff_target = seek_target + seek_evade; // effective target
         eff_target = MAX(eff_target, start_time_tb); // make sure eff_target > start_time
-        TIME_STR time_tmp;
-        format_time(calc_time(eff_target, pStream->time_base, start_time), time_tmp, ':');
+        char time_str[64];
+        format_time(calc_time(eff_target, pStream->time_base, start_time), time_str, sizeof(time_str), ':');
 
         /* for some formats, previous seek might over shoot pass this seek_target; is this a bug in libavcodec? */
         if (prevshot_pts > eff_target && !evade_try)
@@ -2604,13 +2592,13 @@ int make_thumbnail(const char *file, const struct options *o, int nb_file)
             // restart in seek mode of skipping shots (FIXME)
             if (seek_mode && !o->z_seek)
             {
-                av_log(NULL, AV_LOG_INFO, "  *** previous seek overshot target %s; switching to non-seek mode\n", time_tmp);
+                av_log(NULL, AV_LOG_INFO, "  *** previous seek overshot target %s; switching to non-seek mode\n", time_str);
                 av_seek_frame(pFormatCtx, video_index, 0, 0);
                 avcodec_flush_buffers(pCodecCtx);
                 seek_mode = 0;
                 goto restart;
             }
-            av_log(NULL, AV_LOG_INFO, "  skipping shot at %s because of previous seek or evasions\n", time_tmp);
+            av_log(NULL, AV_LOG_INFO, "  skipping shot at %s because of previous seek or evasions\n", time_str);
             idx--;
             thumb_nb--;
             goto skip_shot;
@@ -2619,14 +2607,14 @@ int make_thumbnail(const char *file, const struct options *o, int nb_file)
         // make sure eff_target > previous found
         eff_target = MAX(eff_target, prevfound_pts+1);
 
-        format_time(calc_time(eff_target, pStream->time_base, start_time), time_tmp, ':');
+        format_time(calc_time(eff_target, pStream->time_base, start_time), time_str, sizeof(time_str), ':');
         av_log(NULL, AV_LOG_VERBOSE, "\n***eff_target tb: %"PRId64", eff_target s:%.2f (%s), prevshot_pts: %"PRId64"\n", 
-            eff_target, calc_time(eff_target, pStream->time_base, start_time), time_tmp, prevshot_pts);
+            eff_target, calc_time(eff_target, pStream->time_base, start_time), time_str, prevshot_pts);
 
         /* jump to next shot */
         if (seek_mode)
         {
-            ret = really_seek(pFormatCtx, video_index, eff_target, direction, duration);
+            ret = really_seek(pFormatCtx, video_index, eff_target, duration);
             if (ret < 0)
             {
                 av_log(NULL, AV_LOG_ERROR, "  seeking to %.2f s failed\n", calc_time(eff_target, pStream->time_base, start_time));
@@ -2712,7 +2700,7 @@ int make_thumbnail(const char *file, const struct options *o, int nb_file)
         // got same picture as previous shot, we'll skip it
         if (prevshot_pts == found_pts && !evade_try)
         {
-            av_log(NULL, AV_LOG_INFO, "  skipping shot at %s because got previous shot\n", time_tmp);
+            av_log(NULL, AV_LOG_INFO, "  skipping shot at %s because got previous shot\n", time_str);
             idx--;
             thumb_nb--;
             goto skip_shot;
@@ -2762,9 +2750,9 @@ int make_thumbnail(const char *file, const struct options *o, int nb_file)
             }
 
             // not found -- skip shot
-            TIME_STR time_tmp;
-            format_time(calc_time(seek_target, pStream->time_base, start_time), time_tmp, ':');
-            av_log(NULL, AV_LOG_INFO, "  * blank %.2f or no edge * skipping shot at %s after %d tries\n", blank, time_tmp, evade_try);
+            char time_str[64];
+            format_time(calc_time(seek_target, pStream->time_base, start_time), time_str, sizeof(time_str), ':');
+            av_log(NULL, AV_LOG_INFO, "  * blank %.2f or no edge * skipping shot at %s after %d tries\n", blank, time_str, evade_try);
             thumb_nb--; // reduce # shots
             goto skip_shot;
         }
@@ -2800,8 +2788,8 @@ int make_thumbnail(const char *file, const struct options *o, int nb_file)
         // FIXME: this frame might not actually be at the requested position. is pts correct?
         if (t_timestamp)
         {
-            TIME_STR time_str;
-            format_time(calc_time(found_pts, pStream->time_base, start_time), time_str, ':');
+            char time_str[64];
+            format_time(calc_time(found_pts, pStream->time_base, start_time), time_str, sizeof(time_str), ':');
             char *str_ret = image_string(ip, 
                 o->F_ts_fontname, o->F_ts_color, o->F_ts_font_size, 
                 o->L_time_location, 0, time_str, 1, o->F_ts_shadow, timestamp_text_padding);
@@ -2823,8 +2811,8 @@ int make_thumbnail(const char *file, const struct options *o, int nb_file)
         /* save individual shots */
         if (o->I_individual)
         {
-            TIME_STR time_str;
-            format_time(calc_time(found_pts, pStream->time_base, start_time), time_str, '_');
+            char time_str[64];
+            format_time(calc_time(found_pts, pStream->time_base, start_time), time_str, sizeof(time_str), '_');
 
             if (!individual_filename.len)
                 sb_add_buffer(&individual_filename, &tn.base_filename);
@@ -2865,7 +2853,6 @@ int make_thumbnail(const char *file, const struct options *o, int nb_file)
         seek_target += tn.step_t;
         
         seek_evade = 0;
-        direction = 0;
         evade_try = 0;
         prevshot_pts = found_pts;
         av_log(NULL, AV_LOG_VERBOSE, "found_pts bottom: %"PRId64"\n", found_pts);
