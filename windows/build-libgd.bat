@@ -9,6 +9,8 @@ set LIBJPEG_URL=https://github.com/libjpeg-turbo/libjpeg-turbo
 set LIBJPEG_COMMIT=d0e7c4548a908166b6c4daba549ee86cabe3efba
 set FREETYPE_URL=https://github.com/freetype/freetype
 set FREETYPE_COMMIT=079a22da037835daf5be2bd9eccf7bc1eaa2e783
+set NASM_VER=2.15.05
+set NASM_URL=https://www.nasm.us/pub/nasm/releasebuilds/%NASM_VER%/win32/nasm-%NASM_VER%-win32.zip
 
 set PATH=%PATH%;"C:\Program Files\7-Zip"
 
@@ -16,7 +18,6 @@ call :checkprog curl
 call :checkprog msbuild
 call :checkprog cmake
 call :checkprog patch
-rem call :checkprog nasm
 rem call :checkprog 7z
 
 set OUTDIR=..\gd2
@@ -29,6 +30,22 @@ set DEPS_DIR=..\deps
 rmdir /S /Q tmp
 mkdir tmp
 cd tmp
+
+echo Downloading %NASM_URL%
+curl -O %NASM_URL%
+if errorlevel 1 (
+ echo Failed to download NASM
+ exit 1
+)
+7z x -y nasm-%NASM_VER%-win32.zip
+if errorlevel 1 (
+ echo Failed to extract NASM
+ exit 1
+)
+
+set PATH=%PATH%;%CD%\nasm-%NASM_VER%
+echo %PATH%
+call :checkprog nasm
 
 echo if (MSVC) >cmake.txt
 echo  set (CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /MT") >>cmake.txt
@@ -144,10 +161,14 @@ exit /B
 :build_libgd
 cd libgd
 cd windows
-unix2dos ..\..\..\libgd-win-makefile.patch
-patch -i ..\..\..\libgd-win-makefile.patch
-cd ..
+set PATCH_FILE=..\..\..\libgd-win-makefile.patch
+copy /Y  %PATCH_FILE% %PATCH_FILE%.bak
+unix2dos %PATCH_FILE%
+patch -i %PATCH_FILE%
 if errorlevel 1 call :patch_error libgd
+copy /Y %PATCH_FILE%.bak %PATCH_FILE%
+del %PATCH_FILE%.bak
+cd ..
 nmake /f windows/Makefile.vc WITH_DEVEL=..\%DEPS_DIR%
 if errorlevel 1 call :build_error libgd
 cd ..
