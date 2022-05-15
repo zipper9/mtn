@@ -1,8 +1,8 @@
 @echo off
-set PKG32=ffmpeg-n5.0.1-3-gb655beb025-win32-gpl-shared-5.0
-set PKG64=ffmpeg-n5.0.1-3-gb655beb025-win64-gpl-shared-5.0
-set URL32=https://github.com/sudo-nautilus/FFmpeg-Builds-Win32/releases/download/autobuild-2022-04-23-12-32
-set URL64=https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2022-04-23-12-32
+set PKG32=ffmpeg-n5.0-latest-win32-gpl-shared-5.0
+set PKG64=ffmpeg-n5.0-latest-win64-gpl-shared-5.0
+set URL32=https://github.com/sudo-nautilus/FFmpeg-Builds-Win32/releases/download/latest
+set URL64=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest
 set OUTDIR=..\ffmpeg\
 set PATH=%PATH%;"C:\Program Files\7-Zip"
 
