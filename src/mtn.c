@@ -80,7 +80,8 @@
 #endif
 
 #define EDGE_PARTS 6 // # of parts used in edge detection
-#define EDGE_FOUND 0.001f // edge is considered found
+#define EDGE_FOUND 0.0001 // edge is considered found
+#define CMP_EDGE 180
 
 #define IMAGE_EXTENSION_JPG ".jpg"
 #define IMAGE_EXTENSION_PNG ".png"
@@ -852,9 +853,8 @@ void FrameRGB_convolution(AVFrame *pFrame, int width, int height,
 
 /* begin = upper left, end = lower right
 */
-float cmp_edge(gdImagePtr ip, int xbegin, int ybegin, int xend, int yend)
+double cmp_edge(gdImagePtr ip, int xbegin, int ybegin, int xend, int yend)
 {
-#define CMP_EDGE 208
     int count = 0;
     int i, j;
     for (j = ybegin; j <= yend; j++) {
@@ -867,10 +867,10 @@ float cmp_edge(gdImagePtr ip, int xbegin, int ybegin, int xend, int yend)
             }
         }
     }
-    return (float)count / (yend - ybegin + 1) / (xend - xbegin + 1);
+    return (double) count / ((yend - ybegin + 1) * (xend - xbegin + 1));
 }
 
-int is_edge(float *edge, float edge_found)
+int is_edge(const double *edge, double edge_found)
 {
     if (V_DEBUG)
         return 1; // DEBUG
@@ -892,7 +892,7 @@ http://www.pages.drexel.edu/~weg22/edge.html
 http://student.kuleuven.be/~m0216922/CG/filtering.html
 http://cvs.php.net/viewvc.cgi/php-src/ext/gd/libgd/gd.c?revision=1.111&view=markup
 */
-gdImagePtr detect_edge(AVFrame *pFrame, const struct thumbnail* const tn, float *edge, float edge_found, const struct options *o)
+gdImagePtr detect_edge(AVFrame *pFrame, const struct thumbnail* const tn, double *edge, double edge_found, const struct options *o)
 {
     int width =  tn->shot_width_in;
     int height = tn->shot_height_in;
@@ -962,55 +962,59 @@ gdImagePtr detect_edge(AVFrame *pFrame, const struct thumbnail* const tn, float 
 int
 save_AVFrame(
     const AVFrame* const pFrame,
-    int src_width,
-    int src_height,
-    enum AVPixelFormat pix_fmt,
     char *filename,
     int dst_width,
     int dst_height,
     const struct options *o
 )
 {
-    AVFrame *pFrameRGB = NULL;
+    AVFrame *scaled_frame = NULL;
     uint8_t *rgb_buffer = NULL;
     struct SwsContext *pSwsCtx = NULL;
     gdImagePtr ip = NULL;
     const enum AVPixelFormat rgb_pix_fmt = AV_PIX_FMT_RGB24;
+    int src_width = pFrame->width;
+    int src_height = pFrame->height;
+    enum AVPixelFormat pix_fmt = pFrame->format;
     int result = -1;
 
-    pFrameRGB = av_frame_alloc();
-    if (!pFrameRGB)
+    if (src_width != dst_width || src_height != dst_height || pix_fmt != rgb_pix_fmt)
     {
-        av_log(NULL, AV_LOG_ERROR, "  couldn't allocate a video frame\n");
-        goto cleanup;
-    }
-    int rgb_bufsize = av_image_get_buffer_size(rgb_pix_fmt, dst_width, dst_height, LINESIZE_ALIGN);
-    rgb_buffer = av_malloc(rgb_bufsize);
-    if (!rgb_buffer)
-    {
-        av_log(NULL, AV_LOG_ERROR, "  av_malloc %d bytes failed\n", rgb_bufsize);
-        goto cleanup;
-    }
+        scaled_frame = av_frame_alloc();
+        if (!scaled_frame)
+        {
+            av_log(NULL, AV_LOG_ERROR, "  couldn't allocate a video frame\n");
+            goto cleanup;
+        }
 
-    av_image_fill_arrays(pFrameRGB->data, pFrameRGB->linesize, rgb_buffer, rgb_pix_fmt, dst_width, dst_height, LINESIZE_ALIGN);
+        int rgb_bufsize = av_image_get_buffer_size(rgb_pix_fmt, dst_width, dst_height, LINESIZE_ALIGN);
+        rgb_buffer = av_malloc(rgb_bufsize);
+        if (!rgb_buffer)
+        {
+            av_log(NULL, AV_LOG_ERROR, "  av_malloc %d bytes failed\n", rgb_bufsize);
+            goto cleanup;
+        }
 
-    pSwsCtx = sws_getContext(src_width, src_height, pix_fmt,
-        dst_width, dst_height, rgb_pix_fmt, SWS_BILINEAR, NULL, NULL, NULL);
-    if (!pSwsCtx)
-    {
-        av_log(NULL, AV_LOG_ERROR, "  sws_getContext failed\n");
-        goto cleanup;
+        av_image_fill_arrays(scaled_frame->data, scaled_frame->linesize, rgb_buffer, rgb_pix_fmt, dst_width, dst_height, LINESIZE_ALIGN);
+
+        pSwsCtx = sws_getContext(src_width, src_height, pix_fmt,
+            dst_width, dst_height, rgb_pix_fmt, SWS_BILINEAR, NULL, NULL, NULL);
+        if (!pSwsCtx)
+        {
+            av_log(NULL, AV_LOG_ERROR, "  sws_getContext failed\n");
+            goto cleanup;
+        }
+
+        sws_scale(pSwsCtx, (const uint8_t* const*)pFrame->data, pFrame->linesize, 0, src_height,
+            scaled_frame->data, scaled_frame->linesize);
     }
-
-    sws_scale(pSwsCtx, (const uint8_t* const*)pFrame->data, pFrame->linesize, 0, src_height, 
-        pFrameRGB->data, pFrameRGB->linesize);
     ip = gdImageCreateTrueColor(dst_width, dst_height);
     if (!ip)
     {
         av_log(NULL, AV_LOG_ERROR, "  gdImageCreateTrueColor failed: width %d, height %d\n", dst_width, dst_height);
         goto cleanup;
     }
-    FrameRGB_2_gdImage(pFrameRGB, ip, dst_width, dst_height);
+    FrameRGB_2_gdImage(scaled_frame ? scaled_frame : pFrame, ip, dst_width, dst_height);
     
     int ret = save_image(ip, filename, o);
     if (ret)
@@ -1028,8 +1032,8 @@ cleanup:
         sws_freeContext(pSwsCtx);
     if (rgb_buffer)
         av_free(rgb_buffer);
-    if (pFrameRGB)
-        av_free(pFrameRGB);
+    if (scaled_frame)
+        av_free(scaled_frame);
 
     return result;
 }
@@ -2690,12 +2694,12 @@ int make_thumbnail(const char *file, const struct options *o, int nb_file)
             idx, found_pts, calc_time(found_pts, pStream->time_base, start_time), 
             eff_target, calc_time(eff_target, pStream->time_base, start_time), decode_time);
         av_log(NULL, AV_LOG_VERBOSE, "approx. decoded frames/s: %.2f\n", tn.step_t * tn.time_base * 30 / decode_time); //TODO W: decode_time allways==0
-        /*
-        char debug_filename[2048]; // DEBUG
-        sprintf(debug_filename, "%s_decoded%05d.jpg", tn.out_filename, nb_shots - 1);
-        save_AVFrame(pFrame, pCodecCtx->width, pCodecCtx->height, pCodecCtx->pix_fmt, 
-            debug_filename, pCodecCtx->width, pCodecCtx->height);
-        */
+
+#ifdef DEBUG_IMAGES
+        char debug_filename[2048];
+        sprintf(debug_filename, "%s_decoded%05d.jpg", tn.out_filename.s, nb_shots - 1);
+        save_AVFrame(pFrame, debug_filename, pFrame->width, pFrame->height, o);
+#endif
 
         // got same picture as previous shot, we'll skip it
         if (prevshot_pts == found_pts && !evade_try)
@@ -2715,25 +2719,29 @@ int make_thumbnail(const char *file, const struct options *o, int nb_file)
             av_log(NULL, AV_LOG_ERROR, "  sws_scale() failed\n");
             goto cleanup;
         }
-        /*
-        sprintf(debug_filename, "%s_resized%05d.jpg", tn.out_filename, nb_shots - 1); // DEBUG
-        save_AVFrame(pFrameRGB, tn.shot_width, tn.shot_height, AV_PIX_FMT_RGB24,
-            debug_filename, tn.shot_width, tn.shot_height);
-        */
+
+        pFrameRGB->width = tn.shot_width_in;
+        pFrameRGB->height = output_height;
+        pFrameRGB->format = AV_PIX_FMT_RGB24;
+
+#ifdef DEBUG_IMAGES
+        sprintf(debug_filename, "%s_resized%05d.jpg", tn.out_filename.s, nb_shots - 1);
+        save_AVFrame(pFrameRGB, debug_filename, pFrameRGB->width, pFrameRGB->height, o);
+#endif
 
         /* if blank screen, try again */
         // FIXME: make sure this'll work when step is small
         // FIXME: make sure each shot wont get repeated
         double blank = blank_frame(pFrameRGB, tn.shot_width_out, tn.shot_height_out);
         // only do edge when blank detection doesn't work
-        float edge[EDGE_PARTS] = {1,1,1,1,1,1}; // FIXME: change this if EDGE_PARTS is changed
+        double edge[EDGE_PARTS] = {1,1,1,1,1,1}; // FIXME: change this if EDGE_PARTS is changed
         if (evade_step > 0 && blank <= o->b_blank && o->D_edge > 0)
             edge_ip = rotate_gdImage(
                 detect_edge(pFrameRGB, &tn, edge, EDGE_FOUND, o),
                 tn.rotation);
 
-        //av_log(NULL, AV_LOG_VERBOSE, "  idx: %d, evade_try: %d, blank: %.2f%s edge: %.3f %.3f %.3f %.3f %.3f %.3f%s\n", 
-        //    idx, evade_try, blank, (blank > gb_b_blank) ? "**b**" : "", 
+        //av_log(NULL, AV_LOG_INFO, "  idx: %d, evade_try: %d, blank: %.2f%s edge: %.3f %.3f %.3f %.3f %.3f %.3f%s\n", 
+        //    idx, evade_try, blank, (blank > o->b_blank) ? "**b**" : "", 
         //    edge[0], edge[1], edge[2], edge[3], edge[4], edge[5], is_edge(edge, EDGE_FOUND) ? "" : "**e**"); // DEBUG
         if (evade_step > 0 && (blank > o->b_blank || !is_edge(edge, EDGE_FOUND)))
         {
@@ -2834,8 +2842,7 @@ int make_thumbnail(const char *file, const struct options *o, int nb_file)
                 sb_add_string_len(&individual_filename, "_o_", 3);
                 sb_add_string(&individual_filename, time_str);
                 sb_add_string_len(&individual_filename, index_buf, index_len);
-                if (save_AVFrame(pFrame, pCodecCtx->width, pCodecCtx->height,
-                    pCodecCtx->pix_fmt, individual_filename.s, pCodecCtx->width, pCodecCtx->height, o))
+                if (save_AVFrame(pFrame, individual_filename.s, pFrame->width, pFrame->height, o))
                     av_log(NULL, AV_LOG_ERROR, "  saving individual shot #%05d to %s failed\n", idx, individual_filename.s);
                 sb_shrink(&individual_filename, tn.base_filename.len);
             }
